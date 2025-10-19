@@ -24,6 +24,9 @@ PIPE_SPEED = 140.0
 PIPE_INTERVAL = 1.5
 SERIAL_BAUD = 115200
 BTN_MSG = b'BTN'
+
+DEFAULT_SERIAL_PORT = "COM18"
+
 # ----------------------------
 
 class SerialReader(threading.Thread):
@@ -249,9 +252,7 @@ class FlappyApp:
 
 
 if __name__ == "__main__":
-    port = None
-    if len(sys.argv) >= 2:
-        port = sys.argv[1]
+    port = DEFAULT_SERIAL_PORT
     root = tk.Tk()
     app = FlappyApp(root, serial_port=port)
     try:
