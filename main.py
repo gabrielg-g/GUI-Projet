@@ -100,7 +100,7 @@ class FlappyApp:
         self.bg_img = ImageTk.PhotoImage(bg_cropped)
 
         # Pipes - plus petits et top flipped
-        pipe_base = Image.open("pipe.png")
+        pipe_base = Image.open("pipe2.png")
         pipe_small = pipe_base.resize((pipe_base.width // 3, pipe_base.height // 3), Image.LANCZOS)
         self.pipe_img = ImageTk.PhotoImage(pipe_small)
         self.pipe_img_top = ImageTk.PhotoImage(pipe_small.transpose(Image.FLIP_TOP_BOTTOM))
