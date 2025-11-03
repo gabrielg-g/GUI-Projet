@@ -24,6 +24,9 @@ PIPE_SPEED = 140.0
 PIPE_INTERVAL = 1.5
 SERIAL_BAUD = 115200
 BTN_MSG = b'BTN'
+
+DEFAULT_SERIAL_PORT = "COM18"
+
 # ----------------------------
 
 class SerialReader(threading.Thread):
@@ -70,12 +73,34 @@ class FlappyApp:
         self.canvas.pack()
 
         # --- Load and resize images using Pillow ---
-        bg_base = Image.open("background.png")
-        bg_resized = bg_base.resize((WIDTH, HEIGHT), Image.LANCZOS)
-        self.bg_img = ImageTk.PhotoImage(bg_resized)
+        # --- Load and crop background with preserved ratio ---
+        bg_base = Image.open("background.jpeg")
+        bg_ratio = bg_base.width / bg_base.height
+        screen_ratio = WIDTH / HEIGHT
+
+        # On ajuste seulement la hauteur (pour garder tout le fond)
+        new_height = HEIGHT
+        new_width = int(bg_ratio * new_height)
+
+        bg_resized = bg_base.resize((new_width, new_height), Image.LANCZOS)
+
+        self.bg_full_pil = bg_resized
+        self.bg_full_width = new_width
+        self.bg_full_height = new_height
+        self.bg_scroll_x = 0
+        self.bg_scroll_speed = 60  # pixels/sec
+        self.bg_img = None  # sera mis à jour à chaque frame
+
+        # On centre l’image et on rogne pour qu’elle fasse pile la taille de l’écran
+        left = (new_width - WIDTH) // 2
+        top = (new_height - HEIGHT) // 2
+        bg_cropped = bg_resized.crop((left, top, left + WIDTH, top + HEIGHT))
+
+        self.bg_full_img = ImageTk.PhotoImage(bg_resized)
+        self.bg_img = ImageTk.PhotoImage(bg_cropped)
 
         # Pipes - plus petits et top flipped
-        pipe_base = Image.open("pipe.png")
+        pipe_base = Image.open("pipe2.png")
         pipe_small = pipe_base.resize((pipe_base.width // 3, pipe_base.height // 3), Image.LANCZOS)
         self.pipe_img = ImageTk.PhotoImage(pipe_small)
         self.pipe_img_top = ImageTk.PhotoImage(pipe_small.transpose(Image.FLIP_TOP_BOTTOM))
@@ -159,9 +184,8 @@ class FlappyApp:
             gap_y = random.randint(100, HEIGHT - PIPE_GAP - 100)
             self.pipes.append({'x': WIDTH, 'gap_y': gap_y})
 
-        self.bg_scroll_x -= self.bg_scroll_speed * dt
-        if self.bg_scroll_x <= -self.bg_img.width():
-            self.bg_scroll_x += self.bg_img.width()
+        self.bg_scroll_x += self.bg_scroll_speed * dt
+
 
     def check_collision(self):
         if self.bird_y <= 0 or self.bird_y >= HEIGHT:
@@ -182,10 +206,24 @@ class FlappyApp:
         return False
 
     def draw_background(self):
-        x1 = int(self.bg_scroll_x)
-        x2 = x1 + self.bg_img.width()
-        self.canvas.create_image(x1, 0, image=self.bg_img, anchor='nw')
-        self.canvas.create_image(x2, 0, image=self.bg_img, anchor='nw')
+        # Calcule la portion visible de l'image selon le scroll
+        x = int(self.bg_scroll_x) % self.bg_full_width
+        visible_w = min(WIDTH, self.bg_full_width - x)
+
+        # Découpe la portion visible
+        region = self.bg_full_pil.crop((x, 0, x + visible_w, self.bg_full_height))
+        img1 = ImageTk.PhotoImage(region)
+        self.canvas.create_image(0, 0, image=img1, anchor='nw')
+
+        # Si on arrive à la fin, on doit afficher la partie du début pour remplir l'écran
+        if visible_w < WIDTH:
+            region2 = self.bg_full_pil.crop((0, 0, WIDTH - visible_w, self.bg_full_height))
+            img2 = ImageTk.PhotoImage(region2)
+            self.canvas.create_image(visible_w, 0, image=img2, anchor='nw')
+            # On garde la ref pour éviter le GC
+            self.bg_img = (img1, img2)
+        else:
+            self.bg_img = (img1,)
 
     def draw_game(self):
         self.canvas.delete("all")
@@ -249,9 +287,7 @@ class FlappyApp:
 
 
 if __name__ == "__main__":
-    port = None
-    if len(sys.argv) >= 2:
-        port = sys.argv[1]
+    port = DEFAULT_SERIAL_PORT
     root = tk.Tk()
     app = FlappyApp(root, serial_port=port)
     try:
