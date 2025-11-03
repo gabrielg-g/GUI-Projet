@@ -1,4 +1,4 @@
-# flappy_gui_scroll_v4.py — fond défilant, oiseau & tuyaux plus petits, tuyaux du haut retournés, oiseau incliné
+# flappy_gui_scroll_v8.py — menu étendu avec sélection d'input device
 
 import sys
 import threading
@@ -6,7 +6,7 @@ import queue
 import time
 import random
 import tkinter as tk
-from PIL import Image, ImageTk  # pour gérer les rotations/redimensionnements
+from PIL import Image, ImageTk
 
 try:
     import serial
@@ -24,10 +24,11 @@ PIPE_SPEED = 140.0
 PIPE_INTERVAL = 1.5
 SERIAL_BAUD = 115200
 BTN_MSG = b'BTN'
-
 DEFAULT_SERIAL_PORT = "COM18"
-
 # ----------------------------
+
+INPUT_DEVICES = ["Push Button", "Infrared Sensor", "Digital Encoder", "Ultrasound Sensor"]
+
 
 class SerialReader(threading.Thread):
     def __init__(self, port, baud, out_queue):
@@ -72,104 +73,156 @@ class FlappyApp:
         self.canvas = tk.Canvas(root, width=WIDTH, height=HEIGHT)
         self.canvas.pack()
 
-        # --- Load and resize images using Pillow ---
-        # --- Load and crop background with preserved ratio ---
+        # --- Load images ---
         bg_base = Image.open("background.jpeg")
         bg_ratio = bg_base.width / bg_base.height
-        screen_ratio = WIDTH / HEIGHT
-
-        # On ajuste seulement la hauteur (pour garder tout le fond)
         new_height = HEIGHT
         new_width = int(bg_ratio * new_height)
-
         bg_resized = bg_base.resize((new_width, new_height), Image.LANCZOS)
-
         self.bg_full_pil = bg_resized
         self.bg_full_width = new_width
         self.bg_full_height = new_height
-        self.bg_scroll_x = 0
-        self.bg_scroll_speed = 60  # pixels/sec
-        self.bg_img = None  # sera mis à jour à chaque frame
 
-        # On centre l’image et on rogne pour qu’elle fasse pile la taille de l’écran
-        left = (new_width - WIDTH) // 2
-        top = (new_height - HEIGHT) // 2
-        bg_cropped = bg_resized.crop((left, top, left + WIDTH, top + HEIGHT))
-
-        self.bg_full_img = ImageTk.PhotoImage(bg_resized)
-        self.bg_img = ImageTk.PhotoImage(bg_cropped)
-
-        # Pipes - plus petits et top flipped
         pipe_base = Image.open("pipe2.png")
         pipe_small = pipe_base.resize((pipe_base.width // 3, pipe_base.height // 3), Image.LANCZOS)
         self.pipe_img = ImageTk.PhotoImage(pipe_small)
         self.pipe_img_top = ImageTk.PhotoImage(pipe_small.transpose(Image.FLIP_TOP_BOTTOM))
 
-        # Bird - plus petit
         bird_base = Image.open("bird.png")
         bird_small = bird_base.resize((bird_base.width // 8, bird_base.height // 8), Image.LANCZOS)
-        self.bird_base_img = bird_small  # on garde l'image PIL pour rotation
+        self.bird_base_img = bird_small
         self.bird_img = ImageTk.PhotoImage(self.bird_base_img)
 
-        # Background scroll vars
-        self.bg_scroll_x = 0
-        self.bg_scroll_speed = 60  # px/s
-
-        # --- Game state ---
+        # --- Game variables ---
         self.state = 'menu'
         self.last_time = time.time()
         self.queue = queue.Queue()
         self.serial_thread = None
-        self.recorded_presses = []
-        self.replay_index = 0
+        self.has_played_once = False
+        self.menu_selection = 0
+        self.show_instructions = False
+        self.best_score = 0
+        self.game_over_time = None
+        self.input_device = 0  # index du périphérique sélectionné
+        self.input_selection = 0  # sélection dans le sous-menu
+        self.in_input_menu = False
 
         if serial_port and SERIAL_AVAILABLE:
             self.serial_thread = SerialReader(serial_port, SERIAL_BAUD, self.queue)
             self.serial_thread.start()
-        elif serial_port and not SERIAL_AVAILABLE:
-            print("[Main] pyserial not installed; running in keyboard fallback.")
 
+        # --- Clavier ---
+        self.root.bind('<Up>', self.key_up)
+        self.root.bind('<Down>', self.key_down)
+        self.root.bind('<Return>', self.key_enter)
         self.root.bind('<space>', lambda e: self.queue.put('BTN'))
 
         self.reset_game_vars()
-        self.txt_id = None
-        self.draw_menu()
         self.running = True
         self.root.after(int(1000 / FPS), self.loop)
 
+    # ---------------- MENU ----------------
+    def draw_menu(self):
+        self.canvas.delete("all")
+
+        bg_cropped = self.bg_full_pil.crop((0, 0, WIDTH, HEIGHT))
+        self.bg_img = ImageTk.PhotoImage(bg_cropped)
+        self.canvas.create_image(0, 0, image=self.bg_img, anchor='nw')
+
+        self.canvas.create_text(WIDTH / 2, HEIGHT * 0.15, text="FLAPIC-BIRD", font=("Helvetica", 32, "bold"), fill="white")
+        self.canvas.create_text(WIDTH - 90, 40, text=f"Best: {self.best_score}", font=("Helvetica", 14, "bold"), fill="white")
+
+        if not self.in_input_menu:
+            # MENU PRINCIPAL
+            options = [
+                "Play" if not self.has_played_once else "Replay",
+                "Change Input Device",
+                "Instructions"
+            ]
+            for i, text in enumerate(options):
+                color = "yellow" if i == self.menu_selection else "white"
+                self.canvas.create_text(WIDTH / 2, HEIGHT * 0.35 + i * 50, text=text,
+                                        font=("Helvetica", 20, "bold"), fill=color)
+            if self.show_instructions:
+                frame_color = "#5A7D7C"
+                self.canvas.create_rectangle(30, HEIGHT * 0.6, WIDTH - 30, HEIGHT - 40,
+                                             fill=frame_color, outline="white", width=3)
+                instructions = (
+                    "Welcome to FLAPIC-Bird!\n"
+                    "Fly as far as possible,\n"
+                    "avoid the pipes, and control\n"
+                    "the bird with your PIC or space bar.\n"
+                    "Good luck!"
+                )
+                self.canvas.create_text(WIDTH / 2, HEIGHT * 0.8,
+                                        text=instructions,
+                                        font=("Helvetica", 12, "bold"),
+                                        fill="white", justify='center', width=WIDTH - 80)
+        else:
+            # SOUS-MENU DE SÉLECTION D'INPUT DEVICE
+            self.canvas.create_text(WIDTH / 2, HEIGHT * 0.25,
+                                    text="SELECT INPUT DEVICE", font=("Helvetica", 22, "bold"), fill="white")
+            for i, dev in enumerate(INPUT_DEVICES):
+                color = "yellow" if i == self.input_selection else "white"
+                marker = "←" if i == self.input_device else ""
+                self.canvas.create_text(WIDTH / 2, HEIGHT * 0.35 + i * 50,
+                                        text=f"{dev} {marker}",
+                                        font=("Helvetica", 18, "bold"), fill=color)
+            self.canvas.create_text(WIDTH / 2, HEIGHT - 50, text="Press Enter to confirm / Return to go back",
+                                    font=("Helvetica", 10), fill="white")
+
+    def key_up(self, event):
+        if self.state != 'menu':
+            return
+        if not self.in_input_menu:
+            self.menu_selection = (self.menu_selection - 1) % 3
+            self.show_instructions = False
+        else:
+            self.input_selection = (self.input_selection - 1) % len(INPUT_DEVICES)
+
+    def key_down(self, event):
+        if self.state != 'menu':
+            return
+        if not self.in_input_menu:
+            self.menu_selection = (self.menu_selection + 1) % 3
+            self.show_instructions = False
+        else:
+            self.input_selection = (self.input_selection + 1) % len(INPUT_DEVICES)
+
+    def key_enter(self, event):
+        if self.state != 'menu':
+            return
+
+        if not self.in_input_menu:
+            # MENU PRINCIPAL
+            if self.menu_selection == 0:
+                self.show_instructions = False
+                self.start_game()
+            elif self.menu_selection == 1:
+                self.in_input_menu = True
+            elif self.menu_selection == 2:
+                self.show_instructions = not self.show_instructions
+        else:
+            # SOUS-MENU INPUT
+            self.input_device = self.input_selection
+            self.in_input_menu = False
+            print(f"[INPUT] Device selected: {INPUT_DEVICES[self.input_device]}")
+
+    # ---------------- GAME ----------------
     def reset_game_vars(self):
         self.bird_y = HEIGHT / 2
         self.bird_vy = 0.0
         self.pipes = []
-        self.pipe_timer = 0.0
         self.score = 0
         self.bg_scroll_x = 0
         self.game_start_time = None
 
-    def draw_menu(self):
-        self.canvas.delete("all")
-        self.canvas.create_image(0, 0, image=self.bg_img, anchor='nw')
-        self.canvas.create_text(WIDTH / 2, HEIGHT * 0.2, text="FLAPIC-BIRD", font=("Helvetica", 28, "bold"), fill="white")
-        now = time.time()
-        if int(now) % 2 == 0:
-            self.canvas.create_text(WIDTH / 2, HEIGHT * 0.4, text="Press Start", font=("Helvetica", 20), fill="white")
-        self.canvas.create_text(WIDTH / 2, HEIGHT * 0.6, text="Press Button or Space", font=("Helvetica", 12), fill="white")
-
-    def handle_button(self):
-        if self.state == 'menu':
-            self.start_game()
-        elif self.state == 'play':
-            self.bird_vy = FLAP_VY
-            if self.game_start_time:
-                t = time.time() - self.game_start_time
-                self.recorded_presses.append(t)
-        elif self.state == 'gameover':
-            self.start_game()
-
     def start_game(self):
         self.reset_game_vars()
         self.state = 'play'
+        self.has_played_once = True
         self.game_start_time = time.time()
+        self.game_over_time = None
         for i in range(3):
             self.pipes.append({'x': WIDTH + i * (PIPE_INTERVAL * PIPE_SPEED + 60), 'gap_y': HEIGHT * 0.5})
 
@@ -184,8 +237,7 @@ class FlappyApp:
             gap_y = random.randint(100, HEIGHT - PIPE_GAP - 100)
             self.pipes.append({'x': WIDTH, 'gap_y': gap_y})
 
-        self.bg_scroll_x += self.bg_scroll_speed * dt
-
+        self.bg_scroll_x = (self.bg_scroll_x + 60 * dt) % self.bg_full_width
 
     def check_collision(self):
         if self.bird_y <= 0 or self.bird_y >= HEIGHT:
@@ -206,21 +258,15 @@ class FlappyApp:
         return False
 
     def draw_background(self):
-        # Calcule la portion visible de l'image selon le scroll
         x = int(self.bg_scroll_x) % self.bg_full_width
         visible_w = min(WIDTH, self.bg_full_width - x)
-
-        # Découpe la portion visible
         region = self.bg_full_pil.crop((x, 0, x + visible_w, self.bg_full_height))
         img1 = ImageTk.PhotoImage(region)
         self.canvas.create_image(0, 0, image=img1, anchor='nw')
-
-        # Si on arrive à la fin, on doit afficher la partie du début pour remplir l'écran
         if visible_w < WIDTH:
             region2 = self.bg_full_pil.crop((0, 0, WIDTH - visible_w, self.bg_full_height))
             img2 = ImageTk.PhotoImage(region2)
             self.canvas.create_image(visible_w, 0, image=img2, anchor='nw')
-            # On garde la ref pour éviter le GC
             self.bg_img = (img1, img2)
         else:
             self.bg_img = (img1,)
@@ -228,30 +274,33 @@ class FlappyApp:
     def draw_game(self):
         self.canvas.delete("all")
         self.draw_background()
-
-        # Draw pipes
         for p in self.pipes:
             x = p['x']
             gy = p['gap_y']
             self.canvas.create_image(x, gy - self.pipe_img_top.height(), image=self.pipe_img_top, anchor='nw')
             self.canvas.create_image(x, gy + PIPE_GAP, image=self.pipe_img, anchor='nw')
-
-        # Draw bird with rotation according to velocity
         bx = WIDTH * 0.25
         by = self.bird_y
-        angle = max(-45, min(45, -self.bird_vy / 6))  # ajuste facteur pour inclinaison réaliste
+        angle = max(-45, min(45, -self.bird_vy / 6))
         rotated_bird = self.bird_base_img.rotate(angle, resample=Image.BICUBIC, expand=True)
         self.bird_img = ImageTk.PhotoImage(rotated_bird)
         self.canvas.create_image(bx, by, image=self.bird_img)
-
-        # Score
-        self.canvas.create_text(WIDTH / 2, 30, text=f"Score: {self.score}", font=("Helvetica", 16, "bold"), fill="white")
+        self.canvas.create_text(WIDTH / 2, 30, text=f"Score: {self.score}",
+                                font=("Helvetica", 16, "bold"), fill="white")
 
     def draw_gameover(self):
-        self.canvas.create_text(WIDTH / 2, HEIGHT / 2 - 20, text="GAME OVER", font=("Helvetica", 24, "bold"), fill="white")
-        self.canvas.create_text(WIDTH / 2, HEIGHT / 2 + 20, text=f"Score: {self.score}", font=("Helvetica", 16), fill="white")
-        self.canvas.create_text(WIDTH / 2, HEIGHT / 2 + 60, text="Press Start to play again", font=("Helvetica", 12), fill="white")
+        self.canvas.delete("all")
+        self.draw_background()
+        self.canvas.create_text(WIDTH / 2, HEIGHT / 2 - 60, text="GAME OVER",
+                                font=("Helvetica", 28, "bold"), fill="white")
+        self.canvas.create_text(WIDTH / 2, HEIGHT / 2, text=f"Score: {self.score}",
+                                font=("Helvetica", 18, "bold"), fill="white")
+        self.canvas.create_text(WIDTH / 2, HEIGHT / 2 + 40, text=f"Best: {self.best_score}",
+                                font=("Helvetica", 16), fill="yellow")
+        self.canvas.create_text(WIDTH / 2, HEIGHT / 2 + 90, text="Returning to menu...",
+                                font=("Helvetica", 12), fill="white")
 
+    # ---------------- LOOP ----------------
     def loop(self):
         now = time.time()
         dt = now - self.last_time
@@ -272,13 +321,36 @@ class FlappyApp:
             collided = self.check_collision()
             self.draw_game()
             if collided:
+                if self.score > self.best_score:
+                    self.best_score = self.score
                 self.state = 'gameover'
+                self.game_over_time = now
         elif self.state == 'gameover':
-            self.draw_game()
             self.draw_gameover()
+            if now - self.game_over_time > 3.0:
+                self.state = 'menu'
 
         if self.running:
             self.root.after(int(1000 / FPS), self.loop)
+
+    def handle_button(self):
+        if self.state == 'play':
+            # 🔽 Ici tu implémenteras la gestion réelle selon l’input choisi 🔽
+            if self.input_device == 0:
+                # 🟢 Push Button (par défaut → barre d’espace)
+                self.bird_vy = FLAP_VY
+            elif self.input_device == 1:
+                # 🔴 Infrared Sensor
+                # --> ici tu mettras la lecture de ton capteur IR
+                self.bird_vy = FLAP_VY
+            elif self.input_device == 2:
+                # 🔵 Digital Encoder
+                # --> ici tu mettras la gestion de ton encodeur
+                self.bird_vy = FLAP_VY
+            elif self.input_device == 3:
+                # 🟣 Ultrasound Sensor
+                # --> ici tu mettras la détection du capteur à ultrasons
+                self.bird_vy = FLAP_VY
 
     def stop(self):
         self.running = False
