@@ -27,7 +27,6 @@ DEFAULT_SERIAL_PORT = "COM18"
 
 INPUT_DEVICES = ["Push Button", "Infrared Sensor", "Digital Encoder", "Ultrasound Sensor"]
 
-
 class SerialReader(threading.Thread):
     """Lit les données série du PIC et les place dans une file"""
     def __init__(self, port, baud, out_queue):
@@ -57,7 +56,6 @@ class SerialReader(threading.Thread):
                         line = line.strip().decode(errors='ignore')
                         if not line:
                             continue
-                        # 🔍 Parsing des messages venant du PIC
                         if line == "BTN":
                             self.outq.put(("BTN", None))
                         elif line.startswith("IR:"):
@@ -127,6 +125,9 @@ class FlappyApp:
         # Angle d'affichage de l'oiseau
         self.bird_angle = 0.0
 
+        # --- Mode test ---
+        self.test_mode = False  # ✅ Mode test: ignore collisions
+
         if serial_port and SERIAL_AVAILABLE:
             self.serial_thread = SerialReader(serial_port, SERIAL_BAUD, self.queue)
             self.serial_thread.start()
@@ -136,10 +137,17 @@ class FlappyApp:
         self.root.bind('<Down>', self.key_down)
         self.root.bind('<Return>', self.key_enter)
         self.root.bind('<space>', lambda e: self.queue.put(("BTN", None)))
+        self.root.bind('t', lambda e: self.toggle_test_mode())  # T pour activer/désactiver le mode test
 
         self.reset_game_vars()
         self.running = True
         self.root.after(int(1000 / FPS), self.loop)
+
+    # ---------------- Mode test ----------------
+    def toggle_test_mode(self):
+        """Active ou désactive le mode test (ignore collisions)."""
+        self.test_mode = not self.test_mode
+        print(f"[TEST MODE] {'Activé' if self.test_mode else 'Désactivé'}")
 
     # ---------------- MENU ----------------
     def draw_menu(self):
@@ -193,7 +201,6 @@ class FlappyApp:
     # ---------------- INPUT HANDLING ----------------
     def key_up(self, event):
         if self.state == 'play':
-            # Simulation pour les capteurs analogiques
             if self.input_device == 1:
                 self.ir_value = max(0, self.ir_value - 1)
                 return
@@ -214,7 +221,6 @@ class FlappyApp:
 
     def key_down(self, event):
         if self.state == 'play':
-            # Simulation pour les capteurs analogiques
             if self.input_device == 1:
                 self.ir_value = min(30, self.ir_value + 1)
                 return
@@ -271,7 +277,6 @@ class FlappyApp:
 
     def update_physics(self, dt):
         if self.input_device in [1, 2, 3]:
-            # 🟢 Mapping pour capteurs analogiques : 0–30 → position verticale
             if self.input_device == 1:
                 pos_ratio = self.ir_value / 30.0
             elif self.input_device == 2:
@@ -280,11 +285,8 @@ class FlappyApp:
                 pos_ratio = self.ultra_value / 30.0
             self.bird_y = pos_ratio * (HEIGHT - 50)
         else:
-            # Push button: physique normale
             self.bird_vy += GRAVITY * dt
             self.bird_y += self.bird_vy * dt
-
-            # 🌀 Rotation de l'oiseau selon la vitesse verticale
             target_angle = max(min((self.bird_vy / 400.0) * 60, 60), -20)
             self.bird_angle += (target_angle - self.bird_angle) * 5 * dt
 
@@ -298,6 +300,9 @@ class FlappyApp:
         self.bg_scroll_x = (self.bg_scroll_x + 60 * dt) % self.bg_full_width
 
     def check_collision(self):
+        if self.test_mode:
+            return False  # ✅ Mode test: aucune collision
+
         if self.bird_y <= 0 or self.bird_y >= HEIGHT:
             return True
         bx1 = WIDTH * 0.25 - 10
@@ -315,6 +320,7 @@ class FlappyApp:
                 self.score += 1
         return False
 
+    # ---------------- DRAW ----------------
     def draw_background(self):
         x = int(self.bg_scroll_x) % self.bg_full_width
         visible_w = min(WIDTH, self.bg_full_width - x)
@@ -358,6 +364,9 @@ class FlappyApp:
             val = [self.ir_value, self.enc_value, self.ultra_value][self.input_device - 1]
             self.canvas.create_text(70, 30, text=f"{label}: {val}",
                                     font=("Helvetica", 12), fill="cyan")
+
+        if self.test_mode:
+            self.canvas.create_text(WIDTH - 60, 30, text="TEST", font=("Helvetica", 12, "bold"), fill="red")
 
     def draw_gameover(self):
         self.canvas.delete("all")
