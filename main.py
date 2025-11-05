@@ -1,5 +1,3 @@
-# flappy_gui_scroll_v9_ultrasound.py — version avec contrôle par capteur ultrason simulé
-
 import sys
 import threading
 import queue
@@ -31,6 +29,7 @@ INPUT_DEVICES = ["Push Button", "Infrared Sensor", "Digital Encoder", "Ultrasoun
 
 
 class SerialReader(threading.Thread):
+    """Lit les données série du PIC et les place dans une file"""
     def __init__(self, port, baud, out_queue):
         super().__init__(daemon=True)
         self.port = port
@@ -41,24 +40,39 @@ class SerialReader(threading.Thread):
 
     def run(self):
         try:
-            self.ser = serial.Serial(self.port, self.baud, timeout=0.1)
+            self.ser = serial.Serial(self.port, self.baud, timeout=0.05)
         except Exception as e:
             print(f"[SerialReader] cannot open {self.port}: {e}")
             return
+
         buf = b''
         while not self._stop.is_set():
             try:
                 data = self.ser.read(64)
                 if data:
                     buf += data
-                    if BTN_MSG in buf:
-                        self.outq.put('BTN')
-                        buf = b''
-                    if len(buf) > 1024:
-                        buf = b''
+                    lines = buf.split(b'\n')
+                    buf = lines[-1]
+                    for line in lines[:-1]:
+                        line = line.strip().decode(errors='ignore')
+                        if not line:
+                            continue
+                        # 🔍 Parsing des messages venant du PIC
+                        if line == "BTN":
+                            self.outq.put(("BTN", None))
+                        elif line.startswith("IR:"):
+                            val = int(line.split(":")[1])
+                            self.outq.put(("IR", val))
+                        elif line.startswith("ENC:"):
+                            val = int(line.split(":")[1])
+                            self.outq.put(("ENC", val))
+                        elif line.startswith("ULTRA:"):
+                            val = int(line.split(":")[1])
+                            self.outq.put(("ULTRA", val))
             except Exception as e:
                 print("[SerialReader] read error:", e)
                 break
+
         if self.ser and self.ser.is_open:
             self.ser.close()
 
@@ -76,12 +90,10 @@ class FlappyApp:
         # --- Load images ---
         bg_base = Image.open("background.jpeg")
         bg_ratio = bg_base.width / bg_base.height
-        new_height = HEIGHT
-        new_width = int(bg_ratio * new_height)
-        bg_resized = bg_base.resize((new_width, new_height), Image.LANCZOS)
+        bg_resized = bg_base.resize((int(bg_ratio * HEIGHT), HEIGHT), Image.LANCZOS)
         self.bg_full_pil = bg_resized
-        self.bg_full_width = new_width
-        self.bg_full_height = new_height
+        self.bg_full_width = bg_resized.width
+        self.bg_full_height = HEIGHT
 
         pipe_base = Image.open("pipe2.png")
         pipe_small = pipe_base.resize((pipe_base.width // 3, pipe_base.height // 3), Image.LANCZOS)
@@ -107,25 +119,31 @@ class FlappyApp:
         self.input_selection = 0
         self.in_input_menu = False
 
+        # Valeurs capteurs simulées
+        self.ir_value = 15
+        self.enc_value = 15
+        self.ultra_value = 15
+
+        # Angle d'affichage de l'oiseau
+        self.bird_angle = 0.0
+
         if serial_port and SERIAL_AVAILABLE:
             self.serial_thread = SerialReader(serial_port, SERIAL_BAUD, self.queue)
             self.serial_thread.start()
 
-        # --- Keyboard bindings ---
+        # --- Keyboard ---
         self.root.bind('<Up>', self.key_up)
         self.root.bind('<Down>', self.key_down)
         self.root.bind('<Return>', self.key_enter)
-        self.root.bind('<space>', lambda e: self.queue.put('BTN'))
+        self.root.bind('<space>', lambda e: self.queue.put(("BTN", None)))
 
         self.reset_game_vars()
-        self.ultra_value = 15  # Valeur simulée pour le capteur ultrason (0–30)
         self.running = True
         self.root.after(int(1000 / FPS), self.loop)
 
     # ---------------- MENU ----------------
     def draw_menu(self):
         self.canvas.delete("all")
-
         bg_cropped = self.bg_full_pil.crop((0, 0, WIDTH, HEIGHT))
         self.bg_img = ImageTk.PhotoImage(bg_cropped)
         self.canvas.create_image(0, 0, image=self.bg_img, anchor='nw')
@@ -174,10 +192,17 @@ class FlappyApp:
 
     # ---------------- INPUT HANDLING ----------------
     def key_up(self, event):
-        # Simulation du capteur Ultrason
-        if self.state == 'play' and self.input_device == 3:
-            self.ultra_value = max(0, self.ultra_value - 1)
-            return
+        if self.state == 'play':
+            # Simulation pour les capteurs analogiques
+            if self.input_device == 1:
+                self.ir_value = max(0, self.ir_value - 1)
+                return
+            elif self.input_device == 2:
+                self.enc_value = max(0, self.enc_value - 1)
+                return
+            elif self.input_device == 3:
+                self.ultra_value = max(0, self.ultra_value - 1)
+                return
 
         if self.state != 'menu':
             return
@@ -188,10 +213,17 @@ class FlappyApp:
             self.input_selection = (self.input_selection - 1) % len(INPUT_DEVICES)
 
     def key_down(self, event):
-        # Simulation du capteur Ultrason
-        if self.state == 'play' and self.input_device == 3:
-            self.ultra_value = min(30, self.ultra_value + 1)
-            return
+        if self.state == 'play':
+            # Simulation pour les capteurs analogiques
+            if self.input_device == 1:
+                self.ir_value = min(30, self.ir_value + 1)
+                return
+            elif self.input_device == 2:
+                self.enc_value = min(30, self.enc_value + 1)
+                return
+            elif self.input_device == 3:
+                self.ultra_value = min(30, self.ultra_value + 1)
+                return
 
         if self.state != 'menu':
             return
@@ -226,6 +258,7 @@ class FlappyApp:
         self.score = 0
         self.bg_scroll_x = 0
         self.game_start_time = None
+        self.bird_angle = 0.0
 
     def start_game(self):
         self.reset_game_vars()
@@ -237,13 +270,23 @@ class FlappyApp:
             self.pipes.append({'x': WIDTH + i * (PIPE_INTERVAL * PIPE_SPEED + 60), 'gap_y': HEIGHT * 0.5})
 
     def update_physics(self, dt):
-        # 🟣 Mode Ultrasons : le joueur contrôle directement la position avec la distance
-        if self.input_device == 3:
-            pos_ratio = self.ultra_value / 30.0
+        if self.input_device in [1, 2, 3]:
+            # 🟢 Mapping pour capteurs analogiques : 0–30 → position verticale
+            if self.input_device == 1:
+                pos_ratio = self.ir_value / 30.0
+            elif self.input_device == 2:
+                pos_ratio = self.enc_value / 30.0
+            elif self.input_device == 3:
+                pos_ratio = self.ultra_value / 30.0
             self.bird_y = pos_ratio * (HEIGHT - 50)
         else:
+            # Push button: physique normale
             self.bird_vy += GRAVITY * dt
             self.bird_y += self.bird_vy * dt
+
+            # 🌀 Rotation de l'oiseau selon la vitesse verticale
+            target_angle = max(min((self.bird_vy / 400.0) * 60, 60), -20)
+            self.bird_angle += (target_angle - self.bird_angle) * 5 * dt
 
         for p in self.pipes:
             p['x'] -= PIPE_SPEED * dt
@@ -298,17 +341,22 @@ class FlappyApp:
 
         bx = WIDTH * 0.25
         by = self.bird_y
-        angle = max(-45, min(45, -self.bird_vy / 6))
-        rotated_bird = self.bird_base_img.rotate(angle, resample=Image.BICUBIC, expand=True)
+
+        if self.input_device == 0:
+            rotated_bird = self.bird_base_img.rotate(-self.bird_angle, resample=Image.BICUBIC, expand=True)
+        else:
+            rotated_bird = self.bird_base_img
+
         self.bird_img = ImageTk.PhotoImage(rotated_bird)
         self.canvas.create_image(bx, by, image=self.bird_img)
 
         self.canvas.create_text(WIDTH / 2, 30, text=f"Score: {self.score}",
                                 font=("Helvetica", 16, "bold"), fill="white")
 
-        # Affichage de la valeur simulée (utile en test)
-        if self.input_device == 3:
-            self.canvas.create_text(70, 30, text=f"Ultrasonic: {self.ultra_value}",
+        if self.input_device in [1, 2, 3]:
+            label = INPUT_DEVICES[self.input_device].split()[0]
+            val = [self.ir_value, self.enc_value, self.ultra_value][self.input_device - 1]
+            self.canvas.create_text(70, 30, text=f"{label}: {val}",
                                     font=("Helvetica", 12), fill="cyan")
 
     def draw_gameover(self):
@@ -331,11 +379,18 @@ class FlappyApp:
 
         while True:
             try:
-                ev = self.queue.get_nowait()
+                msg, val = self.queue.get_nowait()
             except queue.Empty:
                 break
-            if ev == 'BTN':
+
+            if msg == "BTN":
                 self.handle_button()
+            elif msg == "IR":
+                self.ir_value = max(0, min(30, val))
+            elif msg == "ENC":
+                self.enc_value = max(0, min(30, val))
+            elif msg == "ULTRA":
+                self.ultra_value = max(0, min(30, val))
 
         if self.state == 'menu':
             self.draw_menu()
@@ -357,21 +412,8 @@ class FlappyApp:
             self.root.after(int(1000 / FPS), self.loop)
 
     def handle_button(self):
-        if self.state == 'play':
-            if self.input_device == 0:
-                self.bird_vy = FLAP_VY
-            elif self.input_device == 1:
-                # 🔴 Infrared Sensor (à implémenter plus tard)
-                self.bird_vy = FLAP_VY
-            elif self.input_device == 2:
-                # 🔵 Digital Encoder (à implémenter plus tard)
-                self.bird_vy = FLAP_VY
-            elif self.input_device == 3:
-                # 🟣 Ultrasound Sensor
-                # ⚙️ Ici tu mettras la lecture réelle du capteur :
-                # Exemple :
-                # self.ultra_value = valeur_lue_depuis_PIC
-                pass
+        if self.state == 'play' and self.input_device == 0:
+            self.bird_vy = FLAP_VY
 
     def stop(self):
         self.running = False
