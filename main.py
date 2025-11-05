@@ -1,4 +1,4 @@
-# flappy_gui_scroll_v8.py — menu étendu avec sélection d'input device
+# flappy_gui_scroll_v9_ultrasound.py — version avec contrôle par capteur ultrason simulé
 
 import sys
 import threading
@@ -103,21 +103,22 @@ class FlappyApp:
         self.show_instructions = False
         self.best_score = 0
         self.game_over_time = None
-        self.input_device = 0  # index du périphérique sélectionné
-        self.input_selection = 0  # sélection dans le sous-menu
+        self.input_device = 0
+        self.input_selection = 0
         self.in_input_menu = False
 
         if serial_port and SERIAL_AVAILABLE:
             self.serial_thread = SerialReader(serial_port, SERIAL_BAUD, self.queue)
             self.serial_thread.start()
 
-        # --- Clavier ---
+        # --- Keyboard bindings ---
         self.root.bind('<Up>', self.key_up)
         self.root.bind('<Down>', self.key_down)
         self.root.bind('<Return>', self.key_enter)
         self.root.bind('<space>', lambda e: self.queue.put('BTN'))
 
         self.reset_game_vars()
+        self.ultra_value = 15  # Valeur simulée pour le capteur ultrason (0–30)
         self.running = True
         self.root.after(int(1000 / FPS), self.loop)
 
@@ -129,11 +130,12 @@ class FlappyApp:
         self.bg_img = ImageTk.PhotoImage(bg_cropped)
         self.canvas.create_image(0, 0, image=self.bg_img, anchor='nw')
 
-        self.canvas.create_text(WIDTH / 2, HEIGHT * 0.15, text="FLAPIC-BIRD", font=("Helvetica", 32, "bold"), fill="white")
-        self.canvas.create_text(WIDTH - 90, 40, text=f"Best: {self.best_score}", font=("Helvetica", 14, "bold"), fill="white")
+        self.canvas.create_text(WIDTH / 2, HEIGHT * 0.12, text="FLAPIC-BIRD",
+                                font=("Helvetica", 32, "bold"), fill="white")
+        self.canvas.create_text(WIDTH - 90, 40, text=f"Best: {self.best_score}",
+                                font=("Helvetica", 14, "bold"), fill="white")
 
         if not self.in_input_menu:
-            # MENU PRINCIPAL
             options = [
                 "Play" if not self.has_played_once else "Replay",
                 "Change Input Device",
@@ -141,8 +143,8 @@ class FlappyApp:
             ]
             for i, text in enumerate(options):
                 color = "yellow" if i == self.menu_selection else "white"
-                self.canvas.create_text(WIDTH / 2, HEIGHT * 0.35 + i * 50, text=text,
-                                        font=("Helvetica", 20, "bold"), fill=color)
+                self.canvas.create_text(WIDTH / 2, HEIGHT * 0.35 + i * 50,
+                                        text=text, font=("Helvetica", 20, "bold"), fill=color)
             if self.show_instructions:
                 frame_color = "#5A7D7C"
                 self.canvas.create_rectangle(30, HEIGHT * 0.6, WIDTH - 30, HEIGHT - 40,
@@ -154,24 +156,29 @@ class FlappyApp:
                     "the bird with your PIC or space bar.\n"
                     "Good luck!"
                 )
-                self.canvas.create_text(WIDTH / 2, HEIGHT * 0.8,
-                                        text=instructions,
+                self.canvas.create_text(WIDTH / 2, HEIGHT * 0.8, text=instructions,
                                         font=("Helvetica", 12, "bold"),
                                         fill="white", justify='center', width=WIDTH - 80)
         else:
-            # SOUS-MENU DE SÉLECTION D'INPUT DEVICE
-            self.canvas.create_text(WIDTH / 2, HEIGHT * 0.25,
-                                    text="SELECT INPUT DEVICE", font=("Helvetica", 22, "bold"), fill="white")
+            self.canvas.create_text(WIDTH / 2, HEIGHT * 0.20, text="SELECT INPUT DEVICE",
+                                    font=("Helvetica", 22, "bold"), fill="white")
             for i, dev in enumerate(INPUT_DEVICES):
                 color = "yellow" if i == self.input_selection else "white"
                 marker = "←" if i == self.input_device else ""
                 self.canvas.create_text(WIDTH / 2, HEIGHT * 0.35 + i * 50,
                                         text=f"{dev} {marker}",
                                         font=("Helvetica", 18, "bold"), fill=color)
-            self.canvas.create_text(WIDTH / 2, HEIGHT - 50, text="Press Enter to confirm / Return to go back",
+            self.canvas.create_text(WIDTH / 2, HEIGHT - 50,
+                                    text="Press Enter to confirm / Return to go back",
                                     font=("Helvetica", 10), fill="white")
 
+    # ---------------- INPUT HANDLING ----------------
     def key_up(self, event):
+        # Simulation du capteur Ultrason
+        if self.state == 'play' and self.input_device == 3:
+            self.ultra_value = max(0, self.ultra_value - 1)
+            return
+
         if self.state != 'menu':
             return
         if not self.in_input_menu:
@@ -181,6 +188,11 @@ class FlappyApp:
             self.input_selection = (self.input_selection - 1) % len(INPUT_DEVICES)
 
     def key_down(self, event):
+        # Simulation du capteur Ultrason
+        if self.state == 'play' and self.input_device == 3:
+            self.ultra_value = min(30, self.ultra_value + 1)
+            return
+
         if self.state != 'menu':
             return
         if not self.in_input_menu:
@@ -194,7 +206,6 @@ class FlappyApp:
             return
 
         if not self.in_input_menu:
-            # MENU PRINCIPAL
             if self.menu_selection == 0:
                 self.show_instructions = False
                 self.start_game()
@@ -203,7 +214,6 @@ class FlappyApp:
             elif self.menu_selection == 2:
                 self.show_instructions = not self.show_instructions
         else:
-            # SOUS-MENU INPUT
             self.input_device = self.input_selection
             self.in_input_menu = False
             print(f"[INPUT] Device selected: {INPUT_DEVICES[self.input_device]}")
@@ -227,8 +237,13 @@ class FlappyApp:
             self.pipes.append({'x': WIDTH + i * (PIPE_INTERVAL * PIPE_SPEED + 60), 'gap_y': HEIGHT * 0.5})
 
     def update_physics(self, dt):
-        self.bird_vy += GRAVITY * dt
-        self.bird_y += self.bird_vy * dt
+        # 🟣 Mode Ultrasons : le joueur contrôle directement la position avec la distance
+        if self.input_device == 3:
+            pos_ratio = self.ultra_value / 30.0
+            self.bird_y = pos_ratio * (HEIGHT - 50)
+        else:
+            self.bird_vy += GRAVITY * dt
+            self.bird_y += self.bird_vy * dt
 
         for p in self.pipes:
             p['x'] -= PIPE_SPEED * dt
@@ -274,19 +289,27 @@ class FlappyApp:
     def draw_game(self):
         self.canvas.delete("all")
         self.draw_background()
+
         for p in self.pipes:
             x = p['x']
             gy = p['gap_y']
             self.canvas.create_image(x, gy - self.pipe_img_top.height(), image=self.pipe_img_top, anchor='nw')
             self.canvas.create_image(x, gy + PIPE_GAP, image=self.pipe_img, anchor='nw')
+
         bx = WIDTH * 0.25
         by = self.bird_y
         angle = max(-45, min(45, -self.bird_vy / 6))
         rotated_bird = self.bird_base_img.rotate(angle, resample=Image.BICUBIC, expand=True)
         self.bird_img = ImageTk.PhotoImage(rotated_bird)
         self.canvas.create_image(bx, by, image=self.bird_img)
+
         self.canvas.create_text(WIDTH / 2, 30, text=f"Score: {self.score}",
                                 font=("Helvetica", 16, "bold"), fill="white")
+
+        # Affichage de la valeur simulée (utile en test)
+        if self.input_device == 3:
+            self.canvas.create_text(70, 30, text=f"Ultrasonic: {self.ultra_value}",
+                                    font=("Helvetica", 12), fill="cyan")
 
     def draw_gameover(self):
         self.canvas.delete("all")
@@ -335,22 +358,20 @@ class FlappyApp:
 
     def handle_button(self):
         if self.state == 'play':
-            # 🔽 Ici tu implémenteras la gestion réelle selon l’input choisi 🔽
             if self.input_device == 0:
-                # 🟢 Push Button (par défaut → barre d’espace)
                 self.bird_vy = FLAP_VY
             elif self.input_device == 1:
-                # 🔴 Infrared Sensor
-                # --> ici tu mettras la lecture de ton capteur IR
+                # 🔴 Infrared Sensor (à implémenter plus tard)
                 self.bird_vy = FLAP_VY
             elif self.input_device == 2:
-                # 🔵 Digital Encoder
-                # --> ici tu mettras la gestion de ton encodeur
+                # 🔵 Digital Encoder (à implémenter plus tard)
                 self.bird_vy = FLAP_VY
             elif self.input_device == 3:
                 # 🟣 Ultrasound Sensor
-                # --> ici tu mettras la détection du capteur à ultrasons
-                self.bird_vy = FLAP_VY
+                # ⚙️ Ici tu mettras la lecture réelle du capteur :
+                # Exemple :
+                # self.ultra_value = valeur_lue_depuis_PIC
+                pass
 
     def stop(self):
         self.running = False
