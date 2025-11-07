@@ -323,35 +323,40 @@ class FlappyApp:
             self.pipes.append({'x': WIDTH + i * (PIPE_INTERVAL * PIPE_SPEED + 60), 'gap_y': HEIGHT * 0.5})
 
     def update_physics(self, dt):
-        # analog-sensor mapping 0..30 -> top..bottom
-        if self.input_device in (1, 2, 3):
+        """Met à jour la physique selon l'input device."""
+        if self.input_device in [1, 2, 3]:
+            # Simulation des capteurs (si pas de données série reçues)
             if self.input_device == 1:
                 pos_ratio = self.ir_value / 30.0
             elif self.input_device == 2:
                 pos_ratio = self.enc_value / 30.0
-            else:
+            elif self.input_device == 3:
                 pos_ratio = self.ultra_value / 30.0
-            self.bird_y = pos_ratio * (HEIGHT - 50)
-            # angle reset for non-push modes
-            self.bird_angle += (0 - self.bird_angle) * 6 * dt
+
+            # ✅ Lissage pour un mouvement fluide
+            target_y = pos_ratio * (HEIGHT - 50)
+            self.bird_y += (target_y - self.bird_y) * 8 * dt
+
         else:
-            # physics
+            # Mode Push Button → physique classique (gravité + saut)
             self.bird_vy += GRAVITY * dt
             self.bird_y += self.bird_vy * dt
-            # smooth rotation based on vertical velocity (only push button mode)
-            target = max(-25, min(70, (self.bird_vy / 400.0) * 60))
-            self.bird_angle += (target - self.bird_angle) * 6 * dt
+            target_angle = max(min((self.bird_vy / 400.0) * 60, 60), -20)
+            self.bird_angle += (target_angle - self.bird_angle) * 5 * dt
 
-        # pipes movement & spawn
+        # Déplacement des tuyaux
         for p in self.pipes:
             p['x'] -= PIPE_SPEED * dt
+
+        # Suppression et ajout de nouveaux tuyaux
         self.pipes = [p for p in self.pipes if p['x'] + self.pipe_img.width() > 0]
         if len(self.pipes) == 0 or (self.pipes[-1]['x'] < WIDTH - (PIPE_SPEED * PIPE_INTERVAL)):
             gap_y = random.randint(100, HEIGHT - PIPE_GAP - 100)
             self.pipes.append({'x': WIDTH, 'gap_y': gap_y})
 
-        # background scroll
+        # Défilement du fond
         self.bg_scroll_x = (self.bg_scroll_x + 60 * dt) % self.bg_full_width
+
 
     def check_collision(self):
         if self.test_mode:
