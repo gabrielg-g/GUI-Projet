@@ -1,0 +1,571 @@
+#include "sysconfig.h"
+#include <xc.h>
+#include "main.h"
+#include "usb_cdc_lib.h"
+#include <stdio.h> // Ajout pour la fonction sprintf
+
+// Définition des pins de l'encodeur
+#define ENCODER_A_PIN PORTBbits.RB6  // Phase A sur RC1
+#define ENCODER_B_PIN PORTBbits.RB7  // Phase B sur RC2
+
+#define TRIG_PIN_PORT PORTCbits.RC1 
+#define ECHO_PIN      PORTCbits.RC2
+#define BUTTON_PIN   PORTBbits.RB0  
+#define NB_MESURES_FILTRAGE 10
+
+// -------------------------
+// Bank 1 : encodeur et mesures
+// -------------------------
+#pragma udata BANK1
+
+uint8_t button_state = 0;   
+uint8_t button_event = 0;  
+
+uint8_t button_state1 = 0;   
+uint8_t button_event1 = 0; 
+
+uint8_t button_state2 = 0;   
+uint8_t button_event2 = 0;
+
+volatile int8_t encoder_delta = 0;   
+uint8_t encoder_state = 0;         
+int16_t encoder_value = 0;
+uint8_t current_state;
+uint8_t current_state_temp;
+uint8_t old_state_temp;
+
+volatile uint16_t us_duration = 0; 
+uint8_t measure_flag = 0;         
+uint16_t last_valid_distance_cm = 0;
+uint16_t moyenne;
+uint16_t diff;
+uint32_t somme;
+uint16_t current_distance_cm;
+
+uint16_t mesures_valides[NB_MESURES_FILTRAGE];
+uint8_t index_mesure = 0;
+uint8_t nb_mesures_validees = 0;
+char buffer[16];
+#pragma udata
+
+// -------------------------
+// Bank 2 : flags et boutons
+// -------------------------
+#pragma udata BANK2
+volatile uint8_t buzzer_counter = 0;
+
+uint8_t buffer_read[16];
+uint8_t len;
+uint8_t score = 0;
+uint8_t score_max = 0;
+uint8_t device = 1;
+uint8_t play = 0;
+
+ 
+
+uint16_t adc_val;
+uint16_t distance_cm;
+#pragma udata
+
+// -------------------------
+// Bank 3 : constantes en RAM
+// -------------------------
+#pragma udata BANK3
+const uint8_t MAX_CHANGE_CM = 10;
+const uint8_t DIVISEUR_CONVERSION = 87;
+const int8_t ENCODER_LOOKUP[4][4] = {
+    //   00  01  10  11
+    { 0,  0,  0,  0},  // État précédent 00
+    { 0,  0,  0, -1},  // État précédent 01
+    { 0,  0,  0,  1},  // État précédent 10
+    { 0,  0,  0,  0}   // État précédent 11
+};
+unsigned char segDigits[10] = {
+    0x3F, // 0
+    0x06, // 1
+    0x5B, // 2
+    0x4F, // 3
+    0x66, // 4
+    0x6D, // 5
+    0x7D, // 6
+    0x07, // 7
+    0x7F, // 8
+    0x6F  // 9
+};
+#pragma udata
+
+void initBuzzer(void)
+{
+    // RE1 en sortie
+    TRISEbits.TRISE1 = 0;
+    LATEbits.LATE1 = 0;
+
+    // --- Config TIMER0 ---
+    T0CONbits.T08BIT = 1; // Timer0 en 8 bits
+    T0CONbits.T0CS = 0;   // horloge interne
+    T0CONbits.PSA = 0;    // prescaler activé
+    T0CONbits.T0PS = 0b101; // 1:64
+    T0CONbits.TMR0ON = 1; // on démarre Timer0
+
+    INTCONbits.TMR0IE = 0; // désactivé par défaut
+    INTCONbits.TMR0IF = 0;
+}
+
+void beep(void)
+{
+    buzzer_counter = 200;  // durée du bip en nombre d'interruptions
+
+    INTCONbits.TMR0IF = 0;
+    TMR0 = 100;
+    INTCONbits.TMR0IE = 1;   // active Timer0 → commence la fréquence
+}
+
+
+
+void ADC_Init(void)
+{ 
+    ADCON1 = 0b00001011; // On choisit les entres analogues de AN0 a AN3
+    ADCON0 = 0b00001100; // on choisit le chanel 3
+    ADCON0bits.ADON = 1; // on allume le module A/D
+    INTCONbits.GIE = 1;
+    PIE1bits.ADIE = 1;
+    INTCONbits.PEIE = 1;   
+}
+void ADC_Read(void)
+{
+    ADCON0bits.GO_nDONE = 1;  // démarre conversion
+    while (ADCON0bits.GO_nDONE); // attente fin
+}
+uint16_t Map_IR_Value(uint16_t raw_val)
+{
+    // bornes mesurées
+    const uint16_t MIN_RAW = 8000;
+    const uint16_t MAX_RAW = 26000;
+    const uint16_t MAX_DIST = 30; // 30 cm
+
+    // bornage (empêche les valeurs hors plage)
+    if (raw_val <= MIN_RAW)
+        return 0;
+    else if (raw_val >= MAX_RAW)
+        return MAX_DIST;
+    else
+    {
+        // mapping linéaire
+        float scaled = (float)(raw_val - MIN_RAW) * MAX_DIST / (MAX_RAW - MIN_RAW);
+        return (uint16_t)scaled;
+    }
+}
+
+
+void checkButtonASM(void);
+void checkButtonASM1(void);
+void checkButtonASM2(void);
+void AfficheScore(int score);
+
+void checkEncoder(void);
+
+void measureDistanceASM(void);
+
+void main(void) 
+{
+    // Initialisation USB
+    initUSBLib();
+    initBuzzer();
+    // Configuration PORTC
+    
+    TRISBbits.TRISB6 = 1;  // RC1 en entrée (Encodeur A)
+    TRISBbits.TRISB7 = 1;  // RC2 en entrée (Encodeur B)
+    TRISCbits.TRISC1 = 0;  // RC1 en sortie (TRIG)
+    TRISCbits.TRISC2 = 1;  // RC2 en entrée (ECHO)
+    TRISBbits.TRISB0 = 1;
+    TRISBbits.TRISB1 = 1;
+    TRISBbits.TRISB2 = 1;
+    TRISEbits.TRISE1 = 0;
+    
+    T1CON = 0x00;           
+    T1CONbits.T1CKPS = 0b11; // Prescaler 1:8
+    T1CONbits.TMR1CS = 0;    // Source d'horloge Fosc/4
+    
+    //TRISAbits.TRISA0 = 0;  // RC1 en entrée (Encodeur A)
+    TRISAbits.TRISA1 = 0;  // RC2 en entrée (Encodeur B)
+    TRISAbits.TRISA2 = 0;
+    //TRISAbits.TRISA3 = 0;
+    //TRISA = 0xF0; // RA0-RA3 en sortie
+    TRISD = 0x00;
+    ADC_Init();
+    
+    encoder_state = (ENCODER_B_PIN << 1) | ENCODER_A_PIN;
+
+    while(1)
+    {
+        USBDeviceTasks();
+        
+        
+        
+
+
+        if(isUSBReady())
+        {
+            AfficheScore(score);
+            
+            len = getsUSBUSART(buffer_read, 16);   ///12|34|1|1
+
+
+            if (len > 0)            // ONLY if we received something
+            {
+            buffer_read[len] = '\0';  // terminate the string safely
+    
+            char *p = strtok((char*)buffer_read, "|");
+            score = atoi(p);
+
+            p = strtok(NULL, "|");
+            score_max = atoi(p);
+
+            p = strtok(NULL, "|");
+            device = atoi(p);
+
+            p = strtok(NULL, "|");
+            play = atoi(p);            
+            }
+ 
+            
+            if (device == 0 || play == 0){
+                checkButtonASM();
+                checkButtonASM1();
+                checkButtonASM2();
+                
+                
+            
+            // Envoi USB si bouton pressé
+             if(button_event)  // uniquement sur transition
+            {
+                sprintf(buffer, "BTN\n");     
+                putUSBUSART((uint8_t*)buffer, strlen(buffer));
+                button_event = 0; // réinitialise l'événement
+               
+                beep();
+                 
+                
+                
+                
+               
+            }
+            if(button_event1)  // uniquement sur transition
+            {
+                sprintf(buffer, "BTN2\n");     
+                putUSBUSART((uint8_t*)buffer, strlen(buffer));
+                button_event1 = 0; // réinitialise l'événement
+            }
+            if(button_event2)  // uniquement sur transition
+            {
+                sprintf(buffer, "BTN1\n");     
+                putUSBUSART((uint8_t*)buffer, strlen(buffer));
+                button_event2 = 0; // réinitialise l'événement
+            }
+            }
+            if (device == 2 && play == 1){
+                checkEncoder();
+                if(encoder_delta != 0) // Si une rotation a eu lieu
+            {
+                // Mettre à jour la variable globale !
+                encoder_value += encoder_delta; 
+
+                // Préparer le message à envoyer
+                 // Buffer pour le message
+                
+                sprintf(buffer, "ENC:%d\n", encoder_value);
+                
+                // Envoi via CDC
+                putUSBUSART((uint8_t*)buffer, strlen(buffer)); // Utilisation de strlen
+                
+                encoder_delta = 0; // Réinitialise l'événement
+            }
+            }
+            if (device == 3 && play == 1){
+                measureDistanceASM();
+                if(measure_flag){
+                    current_distance_cm = 0;
+                    current_distance_cm = us_duration / DIVISEUR_CONVERSION;
+                
+                    diff = 0;
+                    
+                    if (current_distance_cm > 50 || us_duration == 0){
+                        
+                    }
+                    else{
+                        mesures_valides[index_mesure] = current_distance_cm;
+                        if (nb_mesures_validees < NB_MESURES_FILTRAGE)
+                           nb_mesures_validees++;
+                    
+                        index_mesure = (index_mesure + 1) % NB_MESURES_FILTRAGE;
+                        if (nb_mesures_validees == NB_MESURES_FILTRAGE){
+                            somme = 0;
+                            for (uint8_t i = 0; i < NB_MESURES_FILTRAGE; i++)
+                                somme += mesures_valides[i];
+                            moyenne = somme / NB_MESURES_FILTRAGE;
+                            diff = (current_distance_cm > moyenne) ?
+                                (current_distance_cm - moyenne) : (moyenne - current_distance_cm);
+                                sprintf(buffer, "ULTRA:%d\n", moyenne);
+                            
+                            putUSBUSART((uint8_t*)buffer, strlen(buffer));
+                       
+                        }
+                        else{
+                            sprintf(buffer, "ULTRA:%d\n", current_distance_cm);
+                            putUSBUSART((uint8_t*)buffer, strlen(buffer));
+                        }
+                    }
+                measure_flag = 0;
+                }
+                 
+                
+            }
+            if (device == 1 && play == 1)
+        {
+            ADC_Read();
+            
+            distance_cm = Map_IR_Value(adc_val);
+            sprintf(buffer, "IR:%d\r\n", distance_cm);
+            putUSBUSART((uint8_t*)buffer, strlen(buffer));
+        }
+
+        
+            
+        
+        }
+
+       
+        CDCTxService();
+    }
+}
+
+
+void checkButtonASM(void)
+{
+    __asm__ volatile(
+        "BANKSEL PORTB\n\t"
+        "btfss   PORTB, 0\n\t"          // RC1=1 => bouton relâché
+        "goto    BTN_RELEASED\n\t"
+        "goto    BTN_PRESSED\n\t"       
+        
+
+        "BTN_PRESSED:\n\t"
+        "BANKSEL _button_state\n\t"
+        "movf    _button_state, W\n\t"
+        "bnz     END_CHECK_btn\n\t"         // Si déjà 1, ne rien faire (bouton maintenu)
+        "movlw   1\n\t"
+        "movwf   _button_state\n\t"     // Enregistre nouvel état
+        "movlw   1\n\t"
+        "movwf   _button_event\n\t"     // Déclenche événement
+        "goto    END_CHECK_btn\n\t"
+
+        "BTN_RELEASED:\n\t"
+        "BANKSEL _button_state\n\t"
+        "clrf    _button_state\n\t"     // bouton relâché
+               
+
+        "END_CHECK_btn:\n\t"
+    );
+}
+
+void checkButtonASM1(void)
+{
+    __asm__ volatile(
+        "BANKSEL PORTB\n\t"
+        "btfss   PORTB, 1\n\t"          // RC1=1 => bouton relâché
+        "goto    BTN_RELEASED1\n\t"
+        "goto    BTN_PRESSED1\n\t"       
+        
+
+        "BTN_PRESSED1:\n\t"
+        "BANKSEL _button_state1\n\t"
+        "movf    _button_state1, W\n\t"
+        "bnz     END_CHECK_btn1\n\t"         // Si déjà 1, ne rien faire (bouton maintenu)
+        "movlw   1\n\t"
+        "movwf   _button_state1\n\t"     // Enregistre nouvel état
+        "movlw   1\n\t"
+        "movwf   _button_event1\n\t"     // Déclenche événement
+        "goto    END_CHECK_btn1\n\t"
+
+        "BTN_RELEASED1:\n\t"
+        "BANKSEL _button_state1\n\t"
+        "clrf    _button_state1\n\t"     // bouton relâché
+               
+
+        "END_CHECK_btn1:\n\t"
+    );
+}
+
+void checkButtonASM2(void)
+{
+    __asm__ volatile(
+        "BANKSEL PORTB\n\t"
+        "btfss   PORTB, 2\n\t"          // RC1=1 => bouton relâché
+        "goto    BTN_RELEASED2\n\t"
+        "goto    BTN_PRESSED2\n\t"       
+        
+
+        "BTN_PRESSED2:\n\t"
+        "BANKSEL _button_state2\n\t"
+        "movf    _button_state2, W\n\t"
+        "bnz     END_CHECK_btn2\n\t"         // Si déjà 1, ne rien faire (bouton maintenu)
+        "movlw   1\n\t"
+        "movwf   _button_state2\n\t"     // Enregistre nouvel état
+        "movlw   1\n\t"
+        "movwf   _button_event2\n\t"     // Déclenche événement
+        "goto    END_CHECK_btn2\n\t"
+
+        "BTN_RELEASED2:\n\t"
+        "BANKSEL _button_state2\n\t"
+        "clrf    _button_state2\n\t"     // bouton relâché
+               
+
+        "END_CHECK_btn2:\n\t"
+    );
+}
+// --- Fonction de Vérification de l'Encodeur ---
+void checkEncoder(void)
+{// Lit l'état actuel (A et B)
+   
+    current_state = (ENCODER_B_PIN << 1) | ENCODER_A_PIN;
+    
+    // Si l'état a changé
+    if (current_state != encoder_state)
+    {
+        // Utilise la table de lookup pour déterminer le mouvement
+        // encoder_delta est mis à jour avec +1 (CW) ou -1 (CCW) ou 0 (Erreur)
+        encoder_delta += ENCODER_LOOKUP[encoder_state][current_state];
+        
+        // Sauvegarde l'état actuel pour la prochaine vérification
+        encoder_state = current_state;
+    }
+    
+}
+
+
+void measureDistanceASM(void)
+{
+    __asm__ volatile(
+        
+        // --- 1. Impulsion TRIG de 10us sur RC1 (PORTC) ---
+        "BANKSEL PORTC\n\t"
+        "bcf     PORTC, 1\n\t"        // RC1 (TRIG) = LOW
+        "bsf     PORTC, 1\n\t"        // RC1 (TRIG) = HIGH
+        
+        // Délai de 10us par 118 NOPs
+        "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" 
+        "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" 
+        "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" 
+        "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" 
+        "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" 
+        "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" 
+        "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" 
+        "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" 
+        "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" 
+        "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" 
+        "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t"
+        
+        "bcf     PORTC, 1\n\t"        // RC1 (TRIG) = LOW (Fin de l'impulsion) 
+        
+        // --- 2. Attente ECHO HIGH (RC2 - PORTC) et Démarrage TMR1 ---
+        "BANKSEL PORTC\n\t"
+        "WAIT_ECHO_HIGH:\n\t"
+        "btfss   PORTC, 2\n\t"       // Sauter si RC2 (ECHO) est HIGH. Sinon, boucle.
+        "goto    WAIT_ECHO_HIGH\n\t" 
+
+        "BANKSEL TMR1H\n\t"
+        "clrf    TMR1H\n\t"          // Effacer TMR1H
+        "clrf    TMR1L\n\t"          // Effacer TMR1L
+        
+        "BANKSEL T1CON\n\t"
+        "bsf     T1CON, 0\n\t"       // TMR1ON = 1 (Démarrer le compteur)
+        
+        // --- 3. Attente ECHO LOW (RC2 - PORTC) ---
+        "BANKSEL PORTC\n\t"
+        "WAIT_ECHO_LOW:\n\t"
+        "btfsc   PORTC, 2\n\t"       // Sauter si RC2 est LOW. Sinon, boucle.
+        "goto    WAIT_ECHO_LOW\n\t"  
+
+        // --- 4. Arrêt TMR1 et Lecture de la Durée ---
+        "BANKSEL T1CON\n\t"
+        "bcf     T1CON, 0\n\t"       // TMR1ON = 0 (Arrêter le compteur)
+
+        // Lecture TMR1H/L dans la variable C _us_duration
+        // (Lecture LSB puis MSB recommandée)
+        "BANKSEL _us_duration\n\t"
+        "movf    TMR1L, W\n\t"
+        "movwf   _us_duration\n\t"        // LSB 
+        "movf    TMR1H, W\n\t"
+        "movwf   _us_duration + 1\n\t"    // MSB 
+        
+        // --- 5. Déclenchement du flag de mesure ---
+        "BANKSEL _measure_flag\n\t"
+        "movlw   1\n\t"
+        "movwf   _measure_flag\n\t"       // measure_flag = 1
+        
+        "END_CHECK:\n\t"
+    );
+}
+
+void AfficheScore(int score) {
+
+    int digits[2];
+
+    // Séparation du score en digits (si score > 9999 on limite)
+    if(score > 99) score = 99;
+    if(score < 0)     score = 0;
+
+    digits[0] = score % 10;
+    digits[1] = (score / 10) % 10;
+    //digits[2] = (score / 100) % 10;
+   
+
+    // Multiplexage : on affiche rapidement chaque digit
+    for(int i = 0; i < 2; i++) {
+
+        // Sélection du digit (RA0-RA3)
+        PORTA = (1 << i+1);  
+
+        // Envoi du motif au PORTD
+        PORTD = segDigits[digits[i]];
+
+        // Petit délai pour la persistance
+         __delay_ms(1);
+    }
+}
+
+
+
+// --- ISR principal USB ---
+void __interrupt() mainISR(void)
+{
+   // --- Interruption ADC ---
+    if (PIR1bits.ADIF && PIE1bits.ADIE) {
+        PIR1bits.ADIF = 0;
+        adc_val = ((uint16_t)ADRESH << 8) | ADRESL;
+    }
+
+    // --- Interruption USB ---
+    if (PIR2bits.USBIF) {
+        processUSBTasks();
+        PIR2bits.USBIF = 0;
+    }
+    if (INTCONbits.TMR0IF && INTCONbits.TMR0IE) {
+
+        INTCONbits.TMR0IF = 0;
+        TMR0 = 100; // reload
+
+        // Toggle pour créer la fréquence
+        LATEbits.LATE1 ^= 1;
+
+        // durée du bip
+        if (buzzer_counter > 0) {
+            buzzer_counter--;
+            if (buzzer_counter == 0) {
+                LATEbits.LATE1 = 0;
+                INTCONbits.TMR0IE = 0;  // stop Timer
+            }
+        }
+    }
+
+}
