@@ -209,6 +209,7 @@ class FlappyApp:
         self.bird_angle = 0.0
 
     # ---------------- Serial out (periodic) ----------------
+        # ---------------- Serial out (periodic) ----------------
     def serial_send_status(self, now):
         """Envoie: score|best|inputDevice|state_flag\\n"""
         if not SERIAL_AVAILABLE or not self.serial_thread or not getattr(self.serial_thread, 'ser', None):
@@ -224,8 +225,12 @@ class FlappyApp:
             msg = f"{self.score}|{self.best_score}|{self.input_device}|{state_flag}\n"
             ser.write(msg.encode())
             self.last_serial_send = now
-        except Exception:
-            pass
+
+            # 🟢 PRINT DU BUFFER ENVOYÉ AU PIC
+            print(f"[TX → PIC] {msg.strip()}")
+        except Exception as e:
+            print(f"[SerialSend] error: {e}")
+
 
     # ---------------- Test mode toggle ----------------
     def toggle_test_mode(self):
