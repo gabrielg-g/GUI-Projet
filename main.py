@@ -22,7 +22,7 @@ PIPE_GAP = 160
 PIPE_SPEED = 140.0
 PIPE_INTERVAL = 1.5
 SERIAL_BAUD = 115200
-DEFAULT_SERIAL_PORT = "COM18"   # change if needed
+DEFAULT_SERIAL_PORT = "COM4"   # change if needed
 INPUT_DEVICES = ["Push Button", "Infrared Sensor", "Digital Encoder", "Ultrasound Sensor"]
 # ----------------------------
 
@@ -79,6 +79,12 @@ class SerialReader(threading.Thread):
                             try:
                                 v = int(line.split(":", 1)[1])
                                 self.outq.put(("ULTRA", v))
+                            except:
+                                pass
+                        elif line.startswith("MAX:"):
+                            try:
+                                v = int(line.split(":", 1)[1])
+                                self.outq.put(("MAX", v))
                             except:
                                 pass
             except Exception as e:
@@ -452,6 +458,8 @@ class FlappyApp:
                 self.enc_value = val
             elif msg == "ULTRA":
                 self.ultra_value = max(0, min(50, val))
+            elif msg == "MAX":
+                self.best_score = val
         self.serial_send_status(now)
         if self.state == 'menu':
             self.draw_menu()
