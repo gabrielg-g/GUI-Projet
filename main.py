@@ -57,7 +57,6 @@ class SerialReader(threading.Thread):
                         line = raw.decode(errors='ignore').strip()
                         if not line:
                             continue
-                        # Accept several commands
                         if line == "BTN":
                             self.outq.put(("BTN", None))
                         elif line == "BTN1":
@@ -103,25 +102,22 @@ class FlappyApp:
         self.canvas = tk.Canvas(root, width=WIDTH, height=HEIGHT)
         self.canvas.pack()
 
-        # --- Load images (make sure these files exist) ---
+        # --- Load images ---
         try:
             bg_base = Image.open("background.jpeg")
         except Exception:
-            # fallback: plain color if missing
             bg_base = Image.new("RGB", (WIDTH, HEIGHT), (135, 206, 235))
         bg_ratio = bg_base.width / bg_base.height
         bg_resized = bg_base.resize((int(bg_ratio * HEIGHT), HEIGHT), Image.LANCZOS)
         self.bg_full_pil = bg_resized
         self.bg_full_width = bg_resized.width
         self.bg_full_height = HEIGHT
-        # initial bg crop for drawing
         self.bg_scroll_x = 0.0
 
         try:
             pipe_base = Image.open("pipe2.png")
             pipe_small = pipe_base.resize((pipe_base.width // 3, pipe_base.height // 3), Image.LANCZOS)
         except Exception:
-            # simple fallback rectangle if missing
             pipe_small = Image.new("RGBA", (60, 300), (34, 139, 34, 255))
         self.pipe_img = ImageTk.PhotoImage(pipe_small)
         self.pipe_img_top = ImageTk.PhotoImage(pipe_small.transpose(Image.FLIP_TOP_BOTTOM))
@@ -134,7 +130,7 @@ class FlappyApp:
         self.bird_base_img = bird_small
 
         # --- State ---
-        self.state = 'menu'  # menu, play, gameover
+        self.state = 'menu'
         self.last_time = time.time()
         self.queue = queue.Queue()
         self.serial_thread = None
@@ -156,17 +152,13 @@ class FlappyApp:
         # simulated sensor values
         self.ir_value = 15
         self.enc_value = 15
-        self.ultra_value = 15
+        self.enc_center = None   # ✅ new: store initial center for encoder
+        self.ultra_value = 25    # ✅ new: ultrasound initial position (0–50)
 
-        # bird angle for rotation (push button only)
         self.bird_angle = 0.0
-
-        # test mode (no collision)
         self.test_mode = False
 
-        # serial auto-detect if None provided
         if serial_port is None and SERIAL_AVAILABLE:
-            # attempt to use default port if available
             try:
                 import serial.tools.list_ports
                 ports = list(serial.tools.list_ports.comports())
@@ -187,10 +179,7 @@ class FlappyApp:
         self.root.bind('<Down>', self.key_down)
         self.root.bind('<Return>', self.key_enter)
         self.root.bind('<space>', lambda e: self.queue.put(("BTN", None)))
-        # toggle test mode with 'c' (as requested)
         self.root.bind('c', lambda e: self.toggle_test_mode())
-
-        # also allow simulation with left/right during play for quick adjust
         self.root.bind('<Left>', lambda e: self.modify_sensor_value(-1))
         self.root.bind('<Right>', lambda e: self.modify_sensor_value(1))
 
@@ -208,29 +197,23 @@ class FlappyApp:
         self.game_start_time = None
         self.bird_angle = 0.0
 
-    # ---------------- Serial out (periodic) ----------------
-        # ---------------- Serial out (periodic) ----------------
+    # ---------------- Serial out ----------------
     def serial_send_status(self, now):
-        """Envoie: score|best|inputDevice|state_flag\\n"""
         if not SERIAL_AVAILABLE or not self.serial_thread or not getattr(self.serial_thread, 'ser', None):
             return
         try:
             ser = self.serial_thread.ser
             if not (ser and ser.is_open):
                 return
-            # limit send rate to 5 Hz
             if now - self.last_serial_send < 0.2:
                 return
             state_flag = 1 if self.state == 'play' else 0
             msg = f"{self.score}|{self.best_score}|{self.input_device}|{state_flag}\n"
             ser.write(msg.encode())
             self.last_serial_send = now
-
-            # 🟢 PRINT DU BUFFER ENVOYÉ AU PIC
             print(f"[TX → PIC] {msg.strip()}")
         except Exception as e:
             print(f"[SerialSend] error: {e}")
-
 
     # ---------------- Test mode toggle ----------------
     def toggle_test_mode(self):
@@ -239,18 +222,14 @@ class FlappyApp:
 
     # ---------------- Input / Menu handling ----------------
     def key_up(self, event):
-        # If PIC sends BTN1 we put ("BTN1", None) into queue, handled similarly below
         if self.state == 'play':
-            # when playing and using analog inputs, adjust simulated value
             if self.input_device == 1:
                 self.ir_value = max(0, self.ir_value - 1); return
             if self.input_device == 2:
-                self.enc_value = max(0, self.enc_value - 1); return
+                self.enc_value = max(-15, self.enc_value - 1); return
             if self.input_device == 3:
                 self.ultra_value = max(0, self.ultra_value - 1); return
-
-        if self.state != 'menu':
-            return
+        if self.state != 'menu': return
         if not self.in_input_menu:
             self.menu_selection = (self.menu_selection - 1) % 3
             self.show_instructions = False
@@ -262,12 +241,10 @@ class FlappyApp:
             if self.input_device == 1:
                 self.ir_value = min(30, self.ir_value + 1); return
             if self.input_device == 2:
-                self.enc_value = min(30, self.enc_value + 1); return
+                self.enc_value = min(15, self.enc_value + 1); return
             if self.input_device == 3:
-                self.ultra_value = min(30, self.ultra_value + 1); return
-
-        if self.state != 'menu':
-            return
+                self.ultra_value = min(50, self.ultra_value + 1); return
+        if self.state != 'menu': return
         if not self.in_input_menu:
             self.menu_selection = (self.menu_selection + 1) % 3
             self.show_instructions = False
@@ -275,8 +252,7 @@ class FlappyApp:
             self.input_selection = (self.input_selection + 1) % len(INPUT_DEVICES)
 
     def key_enter(self, event):
-        if self.state != 'menu':
-            return
+        if self.state != 'menu': return
         if not self.in_input_menu:
             if self.menu_selection == 0:
                 self.start_game()
@@ -290,25 +266,22 @@ class FlappyApp:
             print(f"[INPUT] selected: {INPUT_DEVICES[self.input_device]}")
 
     def modify_sensor_value(self, delta):
-        """Left/Right arrows adjust currently active sensor while playing"""
-        if self.state != 'play':
-            return
+        if self.state != 'play': return
         if self.input_device == 1:
             self.ir_value = max(0, min(30, self.ir_value + delta))
         elif self.input_device == 2:
-            self.enc_value = max(0, min(30, self.enc_value + delta))
+            self.enc_value = max(-15, min(15, self.enc_value + delta))
         elif self.input_device == 3:
-            self.ultra_value = max(0, min(30, self.ultra_value + delta))
+            self.ultra_value = max(0, min(50, self.ultra_value + delta))
 
     # ---------------- Game controls ----------------
     def handle_button(self):
-        # button action triggered by ("BTN",None) from queue or spacebar
         if self.state == 'menu':
             self.key_enter(None)
         elif self.state == 'play':
             if self.input_device == 0:
                 self.bird_vy = FLAP_VY
-                self.bird_angle = -20.0  # immediate upward tilt
+                self.bird_angle = -20.0
         elif self.state == 'gameover':
             self.state = 'menu'
 
@@ -318,46 +291,45 @@ class FlappyApp:
         self.has_played_once = True
         self.game_start_time = time.time()
         self.game_over_time = None
-        # spawn initial pipes
+        self.enc_center = None  # ✅ reset encoder reference
         for i in range(3):
             self.pipes.append({'x': WIDTH + i * (PIPE_INTERVAL * PIPE_SPEED + 60), 'gap_y': HEIGHT * 0.5})
 
+    # ---------------- Physics ----------------
     def update_physics(self, dt):
-        """Met à jour la physique selon l'input device."""
         if self.input_device in [1, 2, 3]:
-            # Simulation des capteurs (si pas de données série reçues)
             if self.input_device == 1:
                 pos_ratio = self.ir_value / 30.0
-            elif self.input_device == 2:
-                pos_ratio = self.enc_value / 30.0
-            elif self.input_device == 3:
-                pos_ratio = self.ultra_value / 30.0
 
-            # ✅ Lissage pour un mouvement fluide
+            elif self.input_device == 2:
+                # ✅ encodeur relatif à sa première valeur (centre)
+                if self.enc_center is None:
+                    self.enc_center = self.enc_value
+                offset = max(-15, min(15, self.enc_value - self.enc_center))
+                pos_ratio = (offset + 15) / 30.0
+
+            elif self.input_device == 3:
+                # ✅ inversion + plage 0–50
+                pos_ratio = 1.0 - (self.ultra_value / 50.0)
+
             target_y = pos_ratio * (HEIGHT - 50)
             self.bird_y += (target_y - self.bird_y) * 8 * dt
 
         else:
-            # Mode Push Button → physique classique (gravité + saut)
             self.bird_vy += GRAVITY * dt
             self.bird_y += self.bird_vy * dt
             target_angle = max(min((self.bird_vy / 400.0) * 60, 60), -20)
             self.bird_angle += (target_angle - self.bird_angle) * 5 * dt
 
-        # Déplacement des tuyaux
         for p in self.pipes:
             p['x'] -= PIPE_SPEED * dt
-
-        # Suppression et ajout de nouveaux tuyaux
         self.pipes = [p for p in self.pipes if p['x'] + self.pipe_img.width() > 0]
         if len(self.pipes) == 0 or (self.pipes[-1]['x'] < WIDTH - (PIPE_SPEED * PIPE_INTERVAL)):
             gap_y = random.randint(100, HEIGHT - PIPE_GAP - 100)
             self.pipes.append({'x': WIDTH, 'gap_y': gap_y})
-
-        # Défilement du fond
         self.bg_scroll_x = (self.bg_scroll_x + 60 * dt) % self.bg_full_width
 
-
+    # ---------------- Collision ----------------
     def check_collision(self):
         if self.test_mode:
             return False
@@ -373,7 +345,6 @@ class FlappyApp:
             if not (bx2 < px1 or bx1 > px2):
                 if self.bird_y < gap_top or self.bird_y > gap_bottom:
                     return True
-            # scoring
             if px2 < bx1 and not p.get('scored'):
                 p['scored'] = True
                 self.score += 1
@@ -381,7 +352,6 @@ class FlappyApp:
 
     # ---------------- Drawing ----------------
     def draw_background(self):
-        # crop portion based on bg_scroll_x
         x = int(self.bg_scroll_x) % self.bg_full_width
         visible_w = min(WIDTH, self.bg_full_width - x)
         region = self.bg_full_pil.crop((x, 0, x + visible_w, self.bg_full_height))
@@ -391,7 +361,6 @@ class FlappyApp:
             region2 = self.bg_full_pil.crop((0, 0, WIDTH - visible_w, self.bg_full_height))
             img2 = ImageTk.PhotoImage(region2)
             self.canvas.create_image(visible_w, 0, image=img2, anchor='nw')
-            # keep refs to avoid gc
             self._bg_imgs = (img1, img2)
         else:
             self._bg_imgs = (img1,)
@@ -399,35 +368,31 @@ class FlappyApp:
     def draw_game(self):
         self.canvas.delete("all")
         self.draw_background()
-
-        # pipes
         for p in self.pipes:
             x = p['x']; gy = p['gap_y']
             self.canvas.create_image(x, gy - self.pipe_img_top.height(), image=self.pipe_img_top, anchor='nw')
             self.canvas.create_image(x, gy + PIPE_GAP, image=self.pipe_img, anchor='nw')
-
-        # bird
         bx = WIDTH * 0.25
         by = self.bird_y
-        # rotate only in push button mode visually (but we compute angle always)
         if self.input_device == 0:
             rotated = self.bird_base_img.rotate(-self.bird_angle, resample=Image.BICUBIC, expand=True)
         else:
             rotated = self.bird_base_img
         self.bird_img = ImageTk.PhotoImage(rotated)
         self.canvas.create_image(bx, by, image=self.bird_img)
-
-        # HUD
         self.canvas.create_text(WIDTH / 2, 28, text=f"Score: {self.score}", font=("Helvetica", 14, "bold"), fill="white")
         self.canvas.create_text(WIDTH - 70, 28, text=f"Best: {self.best_score}", font=("Helvetica", 12), fill="yellow")
 
-        # sensor value display when using analog devices
         if self.input_device in (1, 2, 3):
             label = INPUT_DEVICES[self.input_device].split()[0]
-            val = [self.ir_value, self.enc_value, self.ultra_value][self.input_device - 1]
+            if self.input_device == 1:
+                val = self.ir_value
+            elif self.input_device == 2:
+                val = self.enc_value
+            else:
+                val = self.ultra_value
             self.canvas.create_text(70, 28, text=f"{label}: {val}", font=("Helvetica", 12), fill="cyan")
 
-        # test mode indicator
         if self.test_mode:
             self.canvas.create_text(80, HEIGHT - 18, text="NO COLLISION", font=("Helvetica", 10, "bold"), fill="red")
 
@@ -442,11 +407,8 @@ class FlappyApp:
     def draw_menu(self):
         self.canvas.delete("all")
         self.draw_background()
-        # Title
         self.canvas.create_text(WIDTH / 2, HEIGHT * 0.14, text="FLAPIC-BIRD", font=("Helvetica", 30, "bold"), fill="white")
-        # Best score
         self.canvas.create_text(WIDTH - 80, 36, text=f"Best: {self.best_score}", font=("Helvetica", 12), fill="yellow")
-
         if not self.in_input_menu:
             options = ["Play" if not self.has_played_once else "Replay", "Change Input Device", "Instructions"]
             for i, t in enumerate(options):
@@ -470,8 +432,6 @@ class FlappyApp:
         now = time.time()
         dt = now - self.last_time
         self.last_time = now
-
-        # Process incoming serial/queue events
         while True:
             try:
                 item = self.queue.get_nowait()
@@ -483,21 +443,16 @@ class FlappyApp:
             if msg == "BTN":
                 self.handle_button()
             elif msg == "BTN1":
-                # move up in menu (works even if called during menu)
                 self.key_up(None)
             elif msg == "BTN2":
                 self.key_down(None)
             elif msg == "IR":
                 self.ir_value = max(0, min(30, val))
             elif msg == "ENC":
-                self.enc_value = max(0, min(30, val))
+                self.enc_value = val
             elif msg == "ULTRA":
-                self.ultra_value = max(0, min(30, val))
-
-        # Send periodic status to PIC
+                self.ultra_value = max(0, min(50, val))
         self.serial_send_status(now)
-
-        # Update game state
         if self.state == 'menu':
             self.draw_menu()
         elif self.state == 'play':
@@ -513,7 +468,6 @@ class FlappyApp:
             self.draw_gameover()
             if now - (self.game_over_time or now) > 3.0:
                 self.state = 'menu'
-
         if self.running:
             self.root.after(int(1000 / FPS), self.loop)
 
