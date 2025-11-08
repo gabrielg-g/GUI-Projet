@@ -2,6 +2,7 @@
 #include <xc.h>
 #include "main.h"
 #include "usb_cdc_lib.h"
+#include "glcd.h"
 #include <stdio.h> // Ajout pour la fonction sprintf
 
 // Définition des pins de l'encodeur
@@ -10,22 +11,13 @@
 
 #define TRIG_PIN_PORT PORTCbits.RC1 
 #define ECHO_PIN      PORTCbits.RC2
-#define BUTTON_PIN   PORTBbits.RB0  
-#define NB_MESURES_FILTRAGE 10
+#define BUTTON_PIN   PORTEbits.RE0  
+#define NB_MESURES_FILTRAGE 20
 
 // -------------------------
 // Bank 1 : encodeur et mesures
 // -------------------------
 #pragma udata BANK1
-
-uint8_t button_state = 0;   
-uint8_t button_event = 0;  
-
-uint8_t button_state1 = 0;   
-uint8_t button_event1 = 0; 
-
-uint8_t button_state2 = 0;   
-uint8_t button_event2 = 0;
 
 volatile int8_t encoder_delta = 0;   
 uint8_t encoder_state = 0;         
@@ -42,16 +34,15 @@ uint16_t diff;
 uint32_t somme;
 uint16_t current_distance_cm;
 
-uint16_t mesures_valides[NB_MESURES_FILTRAGE];
-uint8_t index_mesure = 0;
-uint8_t nb_mesures_validees = 0;
-char buffer[16];
+
 #pragma udata
 
 // -------------------------
 // Bank 2 : flags et boutons
 // -------------------------
 #pragma udata BANK2
+uint8_t button_state = 0;   
+uint8_t button_event = 0;
 volatile uint8_t buzzer_counter = 0;
 
 uint8_t buffer_read[16];
@@ -65,12 +56,18 @@ uint8_t play = 0;
 
 uint16_t adc_val;
 uint16_t distance_cm;
+
+uint16_t mesures_valides[NB_MESURES_FILTRAGE];
+uint8_t index_mesure = 0;
+uint8_t nb_mesures_validees = 0;
+
 #pragma udata
 
 // -------------------------
 // Bank 3 : constantes en RAM
 // -------------------------
 #pragma udata BANK3
+ char buffer[16];
 const uint8_t MAX_CHANGE_CM = 10;
 const uint8_t DIVISEUR_CONVERSION = 87;
 const int8_t ENCODER_LOOKUP[4][4] = {
@@ -92,8 +89,11 @@ unsigned char segDigits[10] = {
     0x7F, // 8
     0x6F  // 9
 };
+char buffer_glcd[10];
+uint8_t graph_x = 0;
+uint8_t graph_timer = 0;
 #pragma udata
-
+void affichage_glcd(int val_glcd);
 void initBuzzer(void)
 {
     // RE1 en sortie
@@ -117,7 +117,7 @@ void beep(void)
 
     INTCONbits.TMR0IF = 0;
     TMR0 = 100;
-    INTCONbits.TMR0IE = 1;   // active Timer0 → commence la fréquence
+    INTCONbits.TMR0IE = 1;   // active Timer0 ? commence la fréquence
 }
 
 
@@ -177,9 +177,10 @@ void main(void)
     TRISBbits.TRISB7 = 1;  // RC2 en entrée (Encodeur B)
     TRISCbits.TRISC1 = 0;  // RC1 en sortie (TRIG)
     TRISCbits.TRISC2 = 1;  // RC2 en entrée (ECHO)
-    TRISBbits.TRISB0 = 1;
-    TRISBbits.TRISB1 = 1;
-    TRISBbits.TRISB2 = 1;
+    
+    
+    TRISEbits.TRISE0 = 1;
+    
     TRISEbits.TRISE1 = 0;
     
     T1CON = 0x00;           
@@ -194,8 +195,11 @@ void main(void)
     TRISD = 0x00;
     ADC_Init();
     
+    
     encoder_state = (ENCODER_B_PIN << 1) | ENCODER_A_PIN;
-
+    glcd_Init(GLCD_ON);      // initialisation GLCD
+    glcd_FillScreen(0);  
+    
     while(1)
     {
         USBDeviceTasks();
@@ -208,7 +212,7 @@ void main(void)
         {
             AfficheScore(score);
             
-            len = getsUSBUSART(buffer_read, 16);   ///12|34|1|1
+            len = getsUSBUSART(buffer_read, 16);   ///12|34|2|1
 
 
             if (len > 0)            // ONLY if we received something
@@ -227,41 +231,37 @@ void main(void)
             p = strtok(NULL, "|");
             play = atoi(p);            
             }
+            
+            if (play == 0){
+                checkEncoder();
+                  if(encoder_delta != 0) // Si une rotation a eu lieu
+            {
+                    if(0 < encoder_delta){
+                        sprintf(buffer, "BTN2\n");     
+                        putUSBUSART((uint8_t*)buffer, strlen(buffer));
+                    }else if (0 > encoder_delta){
+                        sprintf(buffer, "BTN1\n");
+                        putUSBUSART((uint8_t*)buffer, strlen(buffer));
+                    }
+                    encoder_value += encoder_delta;
+                    encoder_delta = 0;
+            }
+            }
  
             
             if (device == 0 || play == 0){
                 checkButtonASM();
-                checkButtonASM1();
-                checkButtonASM2();
                 
-                
-            
-            // Envoi USB si bouton pressé
+              
              if(button_event)  // uniquement sur transition
             {
                 sprintf(buffer, "BTN\n");     
                 putUSBUSART((uint8_t*)buffer, strlen(buffer));
                 button_event = 0; // réinitialise l'événement
                
-                beep();
-                 
-                
-                
-                
-               
+                //beep();   
             }
-            if(button_event1)  // uniquement sur transition
-            {
-                sprintf(buffer, "BTN2\n");     
-                putUSBUSART((uint8_t*)buffer, strlen(buffer));
-                button_event1 = 0; // réinitialise l'événement
-            }
-            if(button_event2)  // uniquement sur transition
-            {
-                sprintf(buffer, "BTN1\n");     
-                putUSBUSART((uint8_t*)buffer, strlen(buffer));
-                button_event2 = 0; // réinitialise l'événement
-            }
+              
             }
             if (device == 2 && play == 1){
                 checkEncoder();
@@ -270,13 +270,12 @@ void main(void)
                 // Mettre à jour la variable globale !
                 encoder_value += encoder_delta; 
 
-                // Préparer le message à envoyer
-                 // Buffer pour le message
                 
                 sprintf(buffer, "ENC:%d\n", encoder_value);
                 
                 // Envoi via CDC
                 putUSBUSART((uint8_t*)buffer, strlen(buffer)); // Utilisation de strlen
+                affichage_glcd(encoder_value);
                 
                 encoder_delta = 0; // Réinitialise l'événement
             }
@@ -289,7 +288,7 @@ void main(void)
                 
                     diff = 0;
                     
-                    if (current_distance_cm > 50 || us_duration == 0){
+                    if (current_distance_cm > 60 || us_duration == 0){
                         
                     }
                     else{
@@ -308,6 +307,7 @@ void main(void)
                                 sprintf(buffer, "ULTRA:%d\n", moyenne);
                             
                             putUSBUSART((uint8_t*)buffer, strlen(buffer));
+                            affichage_glcd(moyenne);
                        
                         }
                         else{
@@ -325,6 +325,7 @@ void main(void)
             ADC_Read();
             
             distance_cm = Map_IR_Value(adc_val);
+            affichage_glcd(distance_cm);
             sprintf(buffer, "IR:%d\r\n", distance_cm);
             putUSBUSART((uint8_t*)buffer, strlen(buffer));
         }
@@ -342,87 +343,26 @@ void main(void)
 
 void checkButtonASM(void)
 {
-    __asm__ volatile(
-        "BANKSEL PORTB\n\t"
-        "btfss   PORTB, 0\n\t"          // RC1=1 => bouton relâché
-        "goto    BTN_RELEASED\n\t"
-        "goto    BTN_PRESSED\n\t"       
-        
+    // Lecture du bouton : 1 = relâché, 0 = pressé
+    uint8_t button_raw = PORTE & 0x01;
 
-        "BTN_PRESSED:\n\t"
-        "BANKSEL _button_state\n\t"
-        "movf    _button_state, W\n\t"
-        "bnz     END_CHECK_btn\n\t"         // Si déjà 1, ne rien faire (bouton maintenu)
-        "movlw   1\n\t"
-        "movwf   _button_state\n\t"     // Enregistre nouvel état
-        "movlw   1\n\t"
-        "movwf   _button_event\n\t"     // Déclenche événement
-        "goto    END_CHECK_btn\n\t"
-
-        "BTN_RELEASED:\n\t"
-        "BANKSEL _button_state\n\t"
-        "clrf    _button_state\n\t"     // bouton relâché
-               
-
-        "END_CHECK_btn:\n\t"
-    );
+    if (button_raw == 1)
+    {
+        // --- BTN_RELEASED ---
+        button_state = 0;        // bouton relâché
+    }
+    else
+    {
+        // --- BTN_PRESSED ---
+        if (button_state != 1)   // si ce n'était pas déjà pressé
+        {
+            button_state = 1;    // nouveau statut
+            button_event = 1;    // événement "nouvelle pression"
+        }
+    }
 }
 
-void checkButtonASM1(void)
-{
-    __asm__ volatile(
-        "BANKSEL PORTB\n\t"
-        "btfss   PORTB, 1\n\t"          // RC1=1 => bouton relâché
-        "goto    BTN_RELEASED1\n\t"
-        "goto    BTN_PRESSED1\n\t"       
-        
 
-        "BTN_PRESSED1:\n\t"
-        "BANKSEL _button_state1\n\t"
-        "movf    _button_state1, W\n\t"
-        "bnz     END_CHECK_btn1\n\t"         // Si déjà 1, ne rien faire (bouton maintenu)
-        "movlw   1\n\t"
-        "movwf   _button_state1\n\t"     // Enregistre nouvel état
-        "movlw   1\n\t"
-        "movwf   _button_event1\n\t"     // Déclenche événement
-        "goto    END_CHECK_btn1\n\t"
-
-        "BTN_RELEASED1:\n\t"
-        "BANKSEL _button_state1\n\t"
-        "clrf    _button_state1\n\t"     // bouton relâché
-               
-
-        "END_CHECK_btn1:\n\t"
-    );
-}
-
-void checkButtonASM2(void)
-{
-    __asm__ volatile(
-        "BANKSEL PORTB\n\t"
-        "btfss   PORTB, 2\n\t"          // RC1=1 => bouton relâché
-        "goto    BTN_RELEASED2\n\t"
-        "goto    BTN_PRESSED2\n\t"       
-        
-
-        "BTN_PRESSED2:\n\t"
-        "BANKSEL _button_state2\n\t"
-        "movf    _button_state2, W\n\t"
-        "bnz     END_CHECK_btn2\n\t"         // Si déjà 1, ne rien faire (bouton maintenu)
-        "movlw   1\n\t"
-        "movwf   _button_state2\n\t"     // Enregistre nouvel état
-        "movlw   1\n\t"
-        "movwf   _button_event2\n\t"     // Déclenche événement
-        "goto    END_CHECK_btn2\n\t"
-
-        "BTN_RELEASED2:\n\t"
-        "BANKSEL _button_state2\n\t"
-        "clrf    _button_state2\n\t"     // bouton relâché
-               
-
-        "END_CHECK_btn2:\n\t"
-    );
-}
 // --- Fonction de Vérification de l'Encodeur ---
 void checkEncoder(void)
 {// Lit l'état actuel (A et B)
@@ -524,7 +464,7 @@ void AfficheScore(int score) {
     for(int i = 0; i < 2; i++) {
 
         // Sélection du digit (RA0-RA3)
-        PORTA = (1 << i+1);  
+        PORTA = (1 << (i+1));  
 
         // Envoi du motif au PORTD
         PORTD = segDigits[digits[i]];
@@ -532,8 +472,35 @@ void AfficheScore(int score) {
         // Petit délai pour la persistance
          __delay_ms(1);
     }
+        
+        
 }
+void affichage_glcd(int val_glcd){
+    PORTA &= ~( (1 << 1) | (1 << 2) );
+    PORTD = 0x00;
+    val_glcd = val_glcd + 10;
+    
+    if(val_glcd < 0) val_glcd = 0;
+    if(val_glcd > 63) val_glcd = 63;
 
+    uint8_t y = 63 - val_glcd; // inversion car y=0 en haut
+
+    // Protection contre =0
+    if(graph_x >= 128) {
+        // Effacer écran quand la courbe atteint le bord
+        glcd_FillScreen(GLCD_BLUE);
+        graph_x = 0;
+    }
+
+    // Tracer un point
+    glcd_PlotPixel(graph_x, y, GLCD_WHITE);
+    graph_timer++;
+    if(graph_timer >= 5) {      // ? augmente ce nombre pour ralentir plus
+    graph_timer = 0;
+
+    // Avancer pour le prochain appel
+    graph_x++;}
+}
 
 
 // --- ISR principal USB ---
