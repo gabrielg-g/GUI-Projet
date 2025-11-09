@@ -48,7 +48,9 @@ volatile uint8_t buzzer_counter = 0;
 uint8_t buffer_read[16];
 uint8_t len;
 uint8_t score = 0;
-uint8_t score_max = 0;
+int score_max = 0;
+int score_max_eeprom = 0;
+uint8_t addresse_eeprom = 0;
 uint8_t device = 1;
 uint8_t play = 0;
 
@@ -94,6 +96,12 @@ uint8_t graph_x = 0;
 uint8_t graph_timer = 0;
 #pragma udata
 void affichage_glcd(int val_glcd);
+
+// FONCTIONS EEPROM
+void EEPROM_WriteByte(uint8_t address, int value);
+int EEPROM_ReadByte(uint8_t address);
+
+
 void initBuzzer(void)
 {
     // RE1 en sortie
@@ -138,24 +146,38 @@ void ADC_Read(void)
 }
 uint16_t Map_IR_Value(uint16_t raw_val)
 {
-    // bornes mesurées
+    //Paramètres de la moyenne glissante
+    #define WINDOW_SIZE 20
+    static uint16_t buffer[WINDOW_SIZE] = {0};
+    static uint8_t index = 0;
+    static uint32_t sum = 0;
+    static uint8_t count = 0;
+
+    // --- Moyenne glissante sur les 20 dernières valeurs ---
+    sum -= buffer[index];
+    buffer[index] = raw_val;
+    sum += raw_val;
+    index++;
+    if (index >= WINDOW_SIZE) index = 0;
+    if (count < WINDOW_SIZE) count++;
+
+    uint16_t avg_raw = (uint16_t)(sum / count);
+
+    // --- Conversion vers distance ---
     const uint16_t MIN_RAW = 8000;
     const uint16_t MAX_RAW = 26000;
-    const uint16_t MAX_DIST = 30; // 30 cm
+    const uint16_t MAX_DIST = 50; // en cm
 
-    // bornage (empêche les valeurs hors plage)
-    if (raw_val <= MIN_RAW)
+    if (avg_raw <= MIN_RAW)
         return 0;
-    else if (raw_val >= MAX_RAW)
+    else if (avg_raw >= MAX_RAW)
         return MAX_DIST;
     else
     {
-        // mapping linéaire
-        float scaled = (float)(raw_val - MIN_RAW) * MAX_DIST / (MAX_RAW - MIN_RAW);
+        float scaled = (float)(avg_raw - MIN_RAW) * MAX_DIST / (MAX_RAW - MIN_RAW);
         return (uint16_t)scaled;
     }
 }
-
 
 void checkButtonASM(void);
 void checkButtonASM1(void);
@@ -198,22 +220,24 @@ void main(void)
     
     encoder_state = (ENCODER_B_PIN << 1) | ENCODER_A_PIN;
     glcd_Init(GLCD_ON);      // initialisation GLCD
-    glcd_FillScreen(0);  
+    glcd_FillScreen(0); 
+    
+    
+    if (EEPROM_ReadByte(addresse_eeprom) == 255 || EEPROM_ReadByte(addresse_eeprom) == 0){
+        EEPROM_WriteByte(addresse_eeprom, 3);
+    }
     
     while(1)
     {
-        USBDeviceTasks();
-        
-        
-        
-
+        USBDeviceTasks();        
 
         if(isUSBReady())
         {
+            
             AfficheScore(score);
             
             len = getsUSBUSART(buffer_read, 16);   ///12|34|2|1
-
+            
 
             if (len > 0)            // ONLY if we received something
             {
@@ -233,9 +257,9 @@ void main(void)
             }
             
             if (play == 0){
+                
                 checkEncoder();
-                  if(encoder_delta != 0) // Si une rotation a eu lieu
-            {
+                if(encoder_delta != 0){ // Si une rotation a eu lieu
                     if(0 < encoder_delta){
                         sprintf(buffer, "BTN2\n");     
                         putUSBUSART((uint8_t*)buffer, strlen(buffer));
@@ -245,7 +269,19 @@ void main(void)
                     }
                     encoder_value += encoder_delta;
                     encoder_delta = 0;
-            }
+                }
+                if (score_max == 0){
+                    char msg [64];
+                    sprintf(msg, "MAX:%d\n", EEPROM_ReadByte(addresse_eeprom));
+                    putUSBUSART((uint8_t*)msg, strlen(msg));
+                }
+                if (score_max > EEPROM_ReadByte(addresse_eeprom)){
+                    char msg [64];
+                    score_max_eeprom = score_max;
+                    EEPROM_WriteByte(addresse_eeprom, score_max_eeprom);
+                    sprintf(msg, "MAX:%d\n", EEPROM_ReadByte(addresse_eeprom));
+                    putUSBUSART((uint8_t*)msg, strlen(msg)); 
+                }
             }
  
             
@@ -255,6 +291,7 @@ void main(void)
               
              if(button_event)  // uniquement sur transition
             {
+                 
                 sprintf(buffer, "BTN\n");     
                 putUSBUSART((uint8_t*)buffer, strlen(buffer));
                 button_event = 0; // réinitialise l'événement
@@ -502,6 +539,29 @@ void affichage_glcd(int val_glcd){
     graph_x++;}
 }
 
+void EEPROM_WriteByte(uint8_t address, int value) {
+    EEADR = address;
+    EEDATA = value;
+    EECON1bits.EEPGD = 0; // Accès EEPROM
+    EECON1bits.CFGS = 0;
+    EECON1bits.WREN = 1;
+
+    INTCONbits.GIE = 0; // Désactiver interruptions
+    EECON2 = 0x55;
+    EECON2 = 0xAA;
+    EECON1bits.WR = 1;
+    while (EECON1bits.WR);
+    EECON1bits.WREN = 0;
+    INTCONbits.GIE = 1;
+}
+
+int EEPROM_ReadByte(uint8_t address) {
+    EEADR = address;
+    EECON1bits.EEPGD = 0;
+    EECON1bits.CFGS = 0;
+    EECON1bits.RD = 1;
+    return EEDATA;
+}
 
 // --- ISR principal USB ---
 void __interrupt() mainISR(void)

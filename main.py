@@ -245,7 +245,7 @@ class FlappyApp:
     def key_down(self, event):
         if self.state == 'play':
             if self.input_device == 1:
-                self.ir_value = min(30, self.ir_value + 1); return
+                self.ir_value = min(30, self.ir_value + 1); return #ICI
             if self.input_device == 2:
                 self.enc_value = min(15, self.enc_value + 1); return
             if self.input_device == 3:
@@ -274,7 +274,7 @@ class FlappyApp:
     def modify_sensor_value(self, delta):
         if self.state != 'play': return
         if self.input_device == 1:
-            self.ir_value = max(0, min(30, self.ir_value + delta))
+            self.ir_value = max(0, min(30, self.ir_value + delta)) #ICI
         elif self.input_device == 2:
             self.enc_value = max(-15, min(15, self.enc_value + delta))
         elif self.input_device == 3:
@@ -305,7 +305,7 @@ class FlappyApp:
     def update_physics(self, dt):
         if self.input_device in [1, 2, 3]:
             if self.input_device == 1:
-                pos_ratio = self.ir_value / 30.0
+                pos_ratio = self.ir_value / 30.0 #ICI
 
             elif self.input_device == 2:
                 # ✅ encodeur relatif à sa première valeur (centre)
@@ -453,7 +453,7 @@ class FlappyApp:
             elif msg == "BTN2":
                 self.key_down(None)
             elif msg == "IR":
-                self.ir_value = max(0, min(30, val))
+                self.ir_value = max(0, min(30, val)) #ICI
             elif msg == "ENC":
                 self.enc_value = val
             elif msg == "ULTRA":
