@@ -1,4 +1,4 @@
-# main.py — Flappy with serial I/O, multiple input modes, test mode (toggle C)
+
 import sys
 import threading
 import queue
@@ -13,7 +13,7 @@ try:
 except Exception:
     SERIAL_AVAILABLE = False
 
-# ---------- Config ----------
+
 FPS = 60
 WIDTH, HEIGHT = 400, 600
 GRAVITY = 900.0
@@ -24,7 +24,7 @@ PIPE_INTERVAL = 1.5
 SERIAL_BAUD = 115200
 DEFAULT_SERIAL_PORT = "COM4"   # change if needed
 INPUT_DEVICES = ["Push Button", "Infrared Sensor", "Digital Encoder", "Ultrasound Sensor"]
-# ----------------------------
+
 
 
 class SerialReader(threading.Thread):
@@ -135,31 +135,28 @@ class FlappyApp:
             bird_small = Image.new("RGBA", (24, 24), (255, 200, 0, 255))
         self.bird_base_img = bird_small
 
-        # --- State ---
+
         self.state = 'menu'
         self.last_time = time.time()
         self.queue = queue.Queue()
         self.serial_thread = None
         self.last_serial_send = 0.0
 
-        # menu/input
         self.menu_selection = 0
         self.in_input_menu = False
         self.input_selection = 0
         self.input_device = 0
 
-        # gameplay
         self.reset_game_vars()
         self.has_played_once = False
         self.show_instructions = False
         self.best_score = 0
         self.game_over_time = None
 
-        # simulated sensor values
         self.ir_value = 15
         self.enc_value = 15
-        self.enc_center = None   # ✅ new: store initial center for encoder
-        self.ultra_value = 25    # ✅ new: ultrasound initial position (0–50)
+        self.enc_center = None   
+        self.ultra_value = 25    
 
         self.bird_angle = 0.0
         self.test_mode = False
@@ -180,7 +177,6 @@ class FlappyApp:
             except Exception as e:
                 print("[Main] serial start failed:", e)
 
-        # --- Bindings ---
         self.root.bind('<Up>', self.key_up)
         self.root.bind('<Down>', self.key_down)
         self.root.bind('<Return>', self.key_enter)
@@ -192,7 +188,6 @@ class FlappyApp:
         self.running = True
         self.root.after(int(1000 / FPS), self.loop)
 
-    # ---------------- Helpers ----------------
     def reset_game_vars(self):
         self.bird_y = HEIGHT / 2
         self.bird_vy = 0.0
@@ -203,7 +198,6 @@ class FlappyApp:
         self.game_start_time = None
         self.bird_angle = 0.0
 
-    # ---------------- Serial out ----------------
     def serial_send_status(self, now):
         if not SERIAL_AVAILABLE or not self.serial_thread or not getattr(self.serial_thread, 'ser', None):
             return
@@ -221,12 +215,10 @@ class FlappyApp:
         except Exception as e:
             print(f"[SerialSend] error: {e}")
 
-    # ---------------- Test mode toggle ----------------
     def toggle_test_mode(self):
         self.test_mode = not self.test_mode
         print(f"[TEST MODE] {'ON' if self.test_mode else 'OFF'}")
 
-    # ---------------- Input / Menu handling ----------------
     def key_up(self, event):
         if self.state == 'play':
             if self.input_device == 1:
@@ -280,7 +272,6 @@ class FlappyApp:
         elif self.input_device == 3:
             self.ultra_value = max(0, min(50, self.ultra_value + delta))
 
-    # ---------------- Game controls ----------------
     def handle_button(self):
         if self.state == 'menu':
             self.key_enter(None)
@@ -297,25 +288,22 @@ class FlappyApp:
         self.has_played_once = True
         self.game_start_time = time.time()
         self.game_over_time = None
-        self.enc_center = None  # ✅ reset encoder reference
+        self.enc_center = None   
         for i in range(3):
             self.pipes.append({'x': WIDTH + i * (PIPE_INTERVAL * PIPE_SPEED + 60), 'gap_y': HEIGHT * 0.5})
 
-    # ---------------- Physics ----------------
     def update_physics(self, dt):
         if self.input_device in [1, 2, 3]:
             if self.input_device == 1:
                 pos_ratio = self.ir_value / 30.0 #ICI
 
             elif self.input_device == 2:
-                # ✅ encodeur relatif à sa première valeur (centre)
                 if self.enc_center is None:
                     self.enc_center = self.enc_value
                 offset = max(-15, min(15, self.enc_value - self.enc_center))
                 pos_ratio = (offset + 15) / 30.0
 
             elif self.input_device == 3:
-                # ✅ inversion + plage 0–50
                 pos_ratio = 1.0 - (self.ultra_value / 50.0)
 
             target_y = pos_ratio * (HEIGHT - 50)
@@ -335,7 +323,6 @@ class FlappyApp:
             self.pipes.append({'x': WIDTH, 'gap_y': gap_y})
         self.bg_scroll_x = (self.bg_scroll_x + 60 * dt) % self.bg_full_width
 
-    # ---------------- Collision ----------------
     def check_collision(self):
         if self.test_mode:
             return False
@@ -356,7 +343,6 @@ class FlappyApp:
                 self.score += 1
         return False
 
-    # ---------------- Drawing ----------------
     def draw_background(self):
         x = int(self.bg_scroll_x) % self.bg_full_width
         visible_w = min(WIDTH, self.bg_full_width - x)
@@ -433,7 +419,6 @@ class FlappyApp:
                 self.canvas.create_text(WIDTH / 2, HEIGHT * 0.34 + i * 46, text=dev + marker, font=("Helvetica", 16), fill=color)
             self.canvas.create_text(WIDTH / 2, HEIGHT - 40, text="Use up/down + Enter (or BTN1/BTN2/BTN)", font=("Helvetica", 10), fill="white")
 
-    # ---------------- Main loop ----------------
     def loop(self):
         now = time.time()
         dt = now - self.last_time
