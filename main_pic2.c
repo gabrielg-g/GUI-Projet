@@ -1,0 +1,491 @@
+#include "sysconfig.h"
+#include <xc.h>
+#include "main.h"
+#include "usb_cdc_lib.h"
+#include "glcd.h"
+#include <stdio.h> 
+
+#define ENCODER_A_PIN PORTBbits.RB6  
+#define ENCODER_B_PIN PORTBbits.RB7 
+
+#define TRIG_PIN_PORT PORTCbits.RC1 
+#define ECHO_PIN      PORTCbits.RC2
+#define BUTTON_PIN   PORTEbits.RE0  
+#define NB_MESURES_FILTRAGE 20
+
+#pragma udata BANK1
+
+volatile int8_t encoder_delta = 0;   
+uint8_t encoder_state = 0;         
+int16_t encoder_value = 0;
+uint8_t current_state;
+uint8_t current_state_temp;
+uint8_t old_state_temp;
+
+volatile uint16_t us_duration = 0; 
+uint8_t measure_flag = 0;         
+uint16_t last_valid_distance_cm = 0;
+uint16_t moyenne;
+uint16_t diff;
+uint32_t somme;
+uint16_t current_distance_cm;
+
+#pragma udata
+
+#pragma udata BANK2
+uint8_t button_state = 0;   
+uint8_t button_event = 0;
+volatile uint8_t buzzer_counter = 0;
+
+uint8_t buffer_read[16];
+uint8_t len;
+uint8_t score = 0;
+int score_max = 0;
+int score_max_eeprom = 0;
+uint8_t addresse_eeprom = 0;
+uint8_t device = 1;
+uint8_t play = 0;
+
+uint16_t adc_val;
+uint16_t distance_cm;
+
+uint16_t mesures_valides[NB_MESURES_FILTRAGE];
+uint8_t index_mesure = 0;
+uint8_t nb_mesures_validees = 0;
+
+#pragma udata
+
+#pragma udata BANK3
+char buffer[16];
+const uint8_t MAX_CHANGE_CM = 10;
+const uint8_t DIVISEUR_CONVERSION = 87;
+const int8_t ENCODER_LOOKUP[4][4] = {
+    { 0,  0,  0,  0},  
+    { 0,  0,  0, -1},  
+    { 0,  0,  0,  1},  
+    { 0,  0,  0,  0}   
+};
+unsigned char segDigits[10] = {
+    0x3F, 
+    0x06, 
+    0x5B, 
+    0x4F, 
+    0x66, 
+    0x6D, 
+    0x7D, 
+    0x07, 
+    0x7F, 
+    0x6F  
+};
+char buffer_glcd[10];
+uint8_t graph_x = 0;
+uint8_t graph_timer = 0;
+#pragma udata
+
+void affichage_glcd(int val_glcd);
+void EEPROM_WriteByte(uint8_t address, int value);
+int EEPROM_ReadByte(uint8_t address);
+
+void initBuzzer(void)
+{
+    TRISEbits.TRISE1 = 0;
+    LATEbits.LATE1 = 0;
+    T0CONbits.T08BIT = 1; 
+    T0CONbits.T0CS = 0;   
+    T0CONbits.PSA = 0;    
+    T0CONbits.T0PS = 0b101; 
+    T0CONbits.TMR0ON = 1; 
+    INTCONbits.TMR0IE = 0; 
+    INTCONbits.TMR0IF = 0;
+}
+
+void beep(void)
+{
+    buzzer_counter = 200;
+    INTCONbits.TMR0IF = 0;
+    TMR0 = 100;
+    INTCONbits.TMR0IE = 1;
+}
+
+void ADC_Init(void)
+{ 
+    ADCON1 = 0b00001011;
+    ADCON0 = 0b00001100;
+    ADCON0bits.ADON = 1;
+    INTCONbits.GIE = 1;
+    PIE1bits.ADIE = 1;
+    INTCONbits.PEIE = 1;   
+}
+
+void ADC_Read(void)
+{
+    ADCON0bits.GO_nDONE = 1;
+    while (ADCON0bits.GO_nDONE);
+}
+
+uint16_t Map_IR_Value(uint16_t raw_val)
+{
+    #define WINDOW_SIZE 20
+    static uint16_t buffer[WINDOW_SIZE] = {0};
+    static uint8_t index = 0;
+    static uint32_t sum = 0;
+    static uint8_t count = 0;
+
+    sum -= buffer[index];
+    buffer[index] = raw_val;
+    sum += raw_val;
+    index++;
+    if (index >= WINDOW_SIZE) index = 0;
+    if (count < WINDOW_SIZE) count++;
+
+    uint16_t avg_raw = (uint16_t)(sum / count);
+
+    const uint16_t MIN_RAW = 8000;
+    const uint16_t MAX_RAW = 26000;
+    const uint16_t MAX_DIST = 50;
+
+    if (avg_raw <= MIN_RAW)
+        return 0;
+    else if (avg_raw >= MAX_RAW)
+        return MAX_DIST;
+    else
+    {
+        float scaled = (float)(avg_raw - MIN_RAW) * MAX_DIST / (MAX_RAW - MIN_RAW);
+        return (uint16_t)scaled;
+    }
+}
+
+void checkButtonASM(void);
+void checkButtonASM1(void);
+void checkButtonASM2(void);
+void AfficheScore(int score);
+void checkEncoder(void);
+void measureDistanceASM(void);
+
+void main(void) 
+{
+    initUSBLib();
+    initBuzzer();
+    
+    TRISBbits.TRISB6 = 1;
+    TRISBbits.TRISB7 = 1;
+    TRISCbits.TRISC1 = 0;
+    TRISCbits.TRISC2 = 1;
+    TRISEbits.TRISE0 = 1;
+    TRISEbits.TRISE1 = 0;
+    
+    T1CON = 0x00;           
+    T1CONbits.T1CKPS = 0b11;
+    T1CONbits.TMR1CS = 0;
+    
+    TRISAbits.TRISA1 = 0;
+    TRISAbits.TRISA2 = 0;
+    TRISD = 0x00;
+    ADC_Init();
+    
+    encoder_state = (ENCODER_B_PIN << 1) | ENCODER_A_PIN;
+    glcd_Init(GLCD_ON);
+    glcd_FillScreen(0);
+    
+    if (EEPROM_ReadByte(addresse_eeprom) == 255 || EEPROM_ReadByte(addresse_eeprom) == 0){
+        EEPROM_WriteByte(addresse_eeprom, 3);
+    }
+    
+    while(1)
+    {
+        USBDeviceTasks();        
+        if(isUSBReady())
+        {
+            AfficheScore(score);
+            len = getsUSBUSART(buffer_read, 16);   
+            if (len > 0)
+            {
+                buffer_read[len] = '\0';
+                char *p = strtok((char*)buffer_read, "|");
+                score = atoi(p);
+                p = strtok(NULL, "|");
+                score_max = atoi(p);
+                p = strtok(NULL, "|");
+                device = atoi(p);
+                p = strtok(NULL, "|");
+                play = atoi(p);
+            }
+            
+            if (play == 0){
+                checkEncoder();
+                if(encoder_delta != 0){
+                    if(0 < encoder_delta){
+                        sprintf(buffer, "BTN2\n");     
+                        putUSBUSART((uint8_t*)buffer, strlen(buffer));
+                    }else if (0 > encoder_delta){
+                        sprintf(buffer, "BTN1\n");
+                        putUSBUSART((uint8_t*)buffer, strlen(buffer));
+                    }
+                    encoder_value += encoder_delta;
+                    encoder_delta = 0;
+                }
+                if (score_max == 0){
+                    char msg [64];
+                    sprintf(msg, "MAX:%d\n", EEPROM_ReadByte(addresse_eeprom));
+                    putUSBUSART((uint8_t*)msg, strlen(msg));
+                }
+                if (score_max > EEPROM_ReadByte(addresse_eeprom)){
+                    char msg [64];
+                    score_max_eeprom = score_max;
+                    EEPROM_WriteByte(addresse_eeprom, score_max_eeprom);
+                    sprintf(msg, "MAX:%d\n", EEPROM_ReadByte(addresse_eeprom));
+                    putUSBUSART((uint8_t*)msg, strlen(msg)); 
+                }
+            }
+            
+            if (device == 0 || play == 0){
+                checkButtonASM();
+                if(button_event)
+                {
+                    sprintf(buffer, "BTN\n");     
+                    putUSBUSART((uint8_t*)buffer, strlen(buffer));
+                    button_event = 0;
+                }
+            }
+            
+            if (device == 2 && play == 1){
+                checkEncoder();
+                if(encoder_delta != 0)
+                {
+                    encoder_value += encoder_delta; 
+                    sprintf(buffer, "ENC:%d\n", encoder_value);
+                    putUSBUSART((uint8_t*)buffer, strlen(buffer));
+                    affichage_glcd(encoder_value);
+                    encoder_delta = 0;
+                }
+            }
+            
+            if (device == 3 && play == 1){
+                measureDistanceASM();
+                if(measure_flag){
+                    current_distance_cm = 0;
+                    current_distance_cm = us_duration / DIVISEUR_CONVERSION;
+                    diff = 0;
+                    if (current_distance_cm > 60 || us_duration == 0){
+                    }
+                    else{
+                        mesures_valides[index_mesure] = current_distance_cm;
+                        if (nb_mesures_validees < NB_MESURES_FILTRAGE)
+                           nb_mesures_validees++;
+                        index_mesure = (index_mesure + 1) % NB_MESURES_FILTRAGE;
+                        if (nb_mesures_validees == NB_MESURES_FILTRAGE){
+                            somme = 0;
+                            for (uint8_t i = 0; i < NB_MESURES_FILTRAGE; i++)
+                                somme += mesures_valides[i];
+                            moyenne = somme / NB_MESURES_FILTRAGE;
+                            diff = (current_distance_cm > moyenne) ?
+                                (current_distance_cm - moyenne) : (moyenne - current_distance_cm);
+                            sprintf(buffer, "ULTRA:%d\n", moyenne);
+                            putUSBUSART((uint8_t*)buffer, strlen(buffer));
+                            affichage_glcd(moyenne);
+                        }
+                        else{
+                            sprintf(buffer, "ULTRA:%d\n", current_distance_cm);
+                            putUSBUSART((uint8_t*)buffer, strlen(buffer));
+                        }
+                    }
+                    measure_flag = 0;
+                }
+            }
+            
+            if (device == 1 && play == 1)
+            {
+                ADC_Read();
+                distance_cm = Map_IR_Value(adc_val);
+                affichage_glcd(distance_cm);
+                sprintf(buffer, "IR:%d\r\n", distance_cm);
+                putUSBUSART((uint8_t*)buffer, strlen(buffer));
+            }
+        }
+        CDCTxService();
+    }
+}
+
+void checkButtonASM(void)
+{
+    __asm__ volatile(
+        "BANKSEL PORTE\n\t"
+        "btfss   PORTE, 0\n\t"          // RC1=1 => bouton relâché
+        "goto    BTN_RELEASED\n\t"
+        "goto    BTN_PRESSED\n\t"       
+        
+
+        "BTN_PRESSED:\n\t"
+        "BANKSEL _button_state\n\t"
+        "movf    _button_state, W\n\t"
+        "bnz     END_CHECK\n\t"         // Si déjà 1, ne rien faire (bouton maintenu)
+        "movlw   1\n\t"
+        "movwf   _button_state\n\t"     // Enregistre nouvel état
+        "movlw   1\n\t"
+        "movwf   _button_event\n\t"     // Déclenche événement
+        "goto    END_CHECK\n\t"
+
+        "BTN_RELEASED:\n\t"
+        "BANKSEL _button_state\n\t"
+        "clrf    _button_state\n\t"     // bouton relâché
+               
+
+        "END_CHECK:\n\t"
+    );
+
+}
+
+void checkEncoder(void)
+{
+    current_state = (ENCODER_B_PIN << 1) | ENCODER_A_PIN;
+    
+    if (current_state != encoder_state)
+    {
+        encoder_delta += ENCODER_LOOKUP[encoder_state][current_state];
+        encoder_state = current_state;
+    }
+}
+
+void measureDistanceASM(void)
+{
+    __asm__ volatile(
+        "BANKSEL PORTC\n\t"
+        "bcf     PORTC, 1\n\t"
+        "bsf     PORTC, 1\n\t"
+        
+        "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" 
+        "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" 
+        "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" 
+        "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" 
+        "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" 
+        "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" 
+        "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" 
+        "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" 
+        "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" 
+        "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" 
+        "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t" "nop\n\t"
+        
+        "bcf     PORTC, 1\n\t"
+        
+        "BANKSEL PORTC\n\t"
+        "WAIT_ECHO_HIGH:\n\t"
+        "btfss   PORTC, 2\n\t"
+        "goto    WAIT_ECHO_HIGH\n\t"
+
+        "BANKSEL TMR1H\n\t"
+        "clrf    TMR1H\n\t"
+        "clrf    TMR1L\n\t"
+        
+        "BANKSEL T1CON\n\t"
+        "bsf     T1CON, 0\n\t"
+        
+        "BANKSEL PORTC\n\t"
+        "WAIT_ECHO_LOW:\n\t"
+        "btfsc   PORTC, 2\n\t"
+        "goto    WAIT_ECHO_LOW\n\t"  
+
+        "BANKSEL T1CON\n\t"
+        "bcf     T1CON, 0\n\t"
+
+        "BANKSEL _us_duration\n\t"
+        "movf    TMR1L, W\n\t"
+        "movwf   _us_duration\n\t"
+        "movf    TMR1H, W\n\t"
+        "movwf   _us_duration + 1\n\t"
+        
+        "BANKSEL _measure_flag\n\t"
+        "movlw   1\n\t"
+        "movwf   _measure_flag\n\t"
+        
+        "END_CHECK:\n\t"
+    );
+}
+
+void AfficheScore(int score) {
+
+    int digits[2];
+
+    if(score > 99) score = 99;
+    if(score < 0)  score = 0;
+
+    digits[0] = score % 10;
+    digits[1] = (score / 10) % 10;
+
+    for(int i = 0; i < 2; i++) {
+        PORTA = (1 << (i+1));  
+        PORTD = segDigits[digits[i]];
+        __delay_ms(1);
+    }
+}
+
+void affichage_glcd(int val_glcd){
+    PORTA &= ~( (1 << 1) | (1 << 2) );
+    PORTD = 0x00;
+    val_glcd = val_glcd + 10;
+    
+    if(val_glcd < 0) val_glcd = 0;
+    if(val_glcd > 63) val_glcd = 63;
+
+    uint8_t y = 63 - val_glcd;
+
+    if(graph_x >= 128) {
+        glcd_FillScreen(GLCD_BLUE);
+        graph_x = 0;
+    }
+
+    glcd_PlotPixel(graph_x, y, GLCD_WHITE);
+    graph_timer++;
+    if(graph_timer >= 5) {
+        graph_timer = 0;
+        graph_x++;
+    }
+}
+
+void EEPROM_WriteByte(uint8_t address, int value) {
+    EEADR = address;
+    EEDATA = value;
+    EECON1bits.EEPGD = 0;
+    EECON1bits.CFGS = 0;
+    EECON1bits.WREN = 1;
+    INTCONbits.GIE = 0;
+    EECON2 = 0x55;
+    EECON2 = 0xAA;
+    EECON1bits.WR = 1;
+    while (EECON1bits.WR);
+    EECON1bits.WREN = 0;
+    INTCONbits.GIE = 1;
+}
+
+int EEPROM_ReadByte(uint8_t address) {
+    EEADR = address;
+    EECON1bits.EEPGD = 0;
+    EECON1bits.CFGS = 0;
+    EECON1bits.RD = 1;
+    return EEDATA;
+}
+
+void __interrupt() mainISR(void)
+{
+    if (PIR1bits.ADIF && PIE1bits.ADIE) {
+        PIR1bits.ADIF = 0;
+        adc_val = ((uint16_t)ADRESH << 8) | ADRESL;
+    }
+
+    if (PIR2bits.USBIF) {
+        processUSBTasks();
+        PIR2bits.USBIF = 0;
+    }
+    
+    if (INTCONbits.TMR0IF && INTCONbits.TMR0IE) {
+        INTCONbits.TMR0IF = 0;
+        TMR0 = 100;
+        LATEbits.LATE1 ^= 1;
+        if (buzzer_counter > 0) {
+            buzzer_counter--;
+            if (buzzer_counter == 0) {
+                LATEbits.LATE1 = 0;
+                INTCONbits.TMR0IE = 0;
+            }
+        }
+    }
+}
